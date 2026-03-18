@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import time
 import re
 import threading
 import queue
@@ -19,6 +20,10 @@ from matplotlib.widgets import Button, TextBox
 
 
 EXECUTABLE_PATH = r"C:\Users\Alfonso.Fernandez\CLionProjects\flight-computer-sim\flight-software\cmake-build-debug\flight_computer_sim.exe"
+
+REPLAY_MODE = False
+REPLAY_CSV_PATH = r"logs\telemetry_YYYYMMDD_HHMMSS.csv"
+REPLAY_STEP_FRAMES = 1
 
 LOG_LINE_PATTERN = re.compile(
     r"\[(?P<level>INFO|WARN|ERROR)\]\[T\+(?P<time>\d+)\s+ms\]\s+(?P<message>.+)"
@@ -103,6 +108,84 @@ class GroundStation:
 
         self.altitude_error = deque(maxlen=MAX_POINTS)
         self.accel_z_error = deque(maxlen=MAX_POINTS)
+
+        self.replay_mode = REPLAY_MODE
+        self.replay_csv_path = REPLAY_CSV_PATH
+        self.replay_frames = []
+        self.replay_index = 0
+
+    def load_replay_csv(self):
+        csv_path = Path(self.replay_csv_path)
+
+        if not csv_path.exists():
+            print(f"Replay CSV not found: {csv_path}")
+            sys.exit(1)
+
+        self.replay_frames.clear()
+
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+
+            for row in reader:
+                frame = TelemetryFrame(
+                    time_ms=int(row["time_ms"]),
+                    mode=row["mode"],
+                    mission_phase=row.get("mission_phase", "UNKNOWN"),
+                    truth_time_s=float(row.get("truth_time_s", 0.0)),
+                    truth_altitude_m=float(row.get("truth_altitude_m", 0.0)),
+                    truth_velocity_z_mps=float(row.get("truth_velocity_z_mps", 0.0)),
+                    truth_acceleration_z_mps2=float(row.get("truth_acceleration_z_mps2", 0.0)),
+                    ax=float(row["ax"]),
+                    ay=float(row["ay"]),
+                    az=float(row["az"]),
+                    imu_valid=int(row["imu_valid"]),
+                    altitude_m=float(row["altitude_m"]),
+                    alt_valid=int(row["alt_valid"]),
+                    imu_fault_count=int(row["imu_fault_count"]),
+                    imu_recovery_count=int(row["imu_recovery_count"]),
+                    alt_fault_count=int(row["alt_fault_count"]),
+                    alt_recovery_count=int(row["alt_recovery_count"]),
+                    imu_latched=int(row["imu_latched"]),
+                    alt_latched=int(row["alt_latched"]),
+                    health_status=int(row["health_status"]),
+                )
+                self.replay_frames.append(frame)
+
+        self.replay_index = 0
+        print(f"Loaded {len(self.replay_frames)} replay frames from {csv_path}")
+
+    def consume_replay_frames(self):
+        if self.replay_index >= len(self.replay_frames):
+            return
+
+        for _ in range(REPLAY_STEP_FRAMES):
+            if self.replay_index >= len(self.replay_frames):
+                break
+
+            telemetry = self.replay_frames[self.replay_index]
+            self.replay_index += 1
+
+            time_s = telemetry.time_ms / 1000.0
+
+            self.times.append(time_s)
+
+            self.altitudes.append(telemetry.altitude_m)
+            self.truth_altitudes.append(telemetry.truth_altitude_m)
+
+            self.accel_x.append(telemetry.ax)
+            self.accel_y.append(telemetry.ay)
+            self.accel_z.append(telemetry.az)
+            self.truth_accel_z.append(telemetry.truth_acceleration_z_mps2)
+
+            self.truth_velocity_z.append(telemetry.truth_velocity_z_mps)
+
+            self.altitude_error.append(telemetry.altitude_m - telemetry.truth_altitude_m)
+            self.accel_z_error.append(telemetry.az - telemetry.truth_acceleration_z_mps2)
+
+            self.latest_frame = telemetry
+            self.latest_mode = telemetry.mode
+
+            self.record_mode_transition_if_needed(telemetry)
 
     def start_simulator(self):
         try:
@@ -326,6 +409,10 @@ class GroundStation:
             self.csv_writer = None
 
     def send_command(self, cmd: str):
+        if self.replay_mode:
+            self.record_event(f"REPLAY    | command ignored in replay mode: {cmd}")
+            return
+
         if self.process is None or self.process.stdin is None:
             return
 
@@ -395,7 +482,10 @@ class GroundStation:
             self.ax_xy.axvline(t_s, linestyle="--", linewidth=1.0, color=color, alpha=0.65)
 
     def update_dashboard(self, _frame):
-        self.consume_available_output()
+        if self.replay_mode:
+            self.consume_replay_frames()
+        else:
+            self.consume_available_output()
 
         self.ax_alt.clear()
         self.ax_alt_err.clear()
@@ -460,6 +550,9 @@ class GroundStation:
             lf = self.latest_frame
             status_text = self.health_status_text(lf.health_status)
 
+            csv_label = self.csv_path.name if self.csv_path else "n/a"
+            replay_label = f"{self.replay_index}/{len(self.replay_frames)}" if self.replay_mode else "LIVE"
+
             panel_text = (
                 f"Mode: {lf.mode}\n"
                 f"Mission Phase: {lf.mission_phase}\n"
@@ -468,7 +561,7 @@ class GroundStation:
                 f"Truth Vel Z: {lf.truth_velocity_z_mps:.2f} m/s\n"
                 f"Truth Accel Z: {lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
                 f"Measured Altitude: {lf.altitude_m:.2f} m\n"
-                f"Measured Accel Z: {lf.az:.2f} m/s²\n\n"
+                f"Measured Accel Z: {lf.az:.2f} m/s²\n"
                 f"Altitude Error: {lf.altitude_m - lf.truth_altitude_m:.2f} m\n"
                 f"Accel Z Error: {lf.az - lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
                 f"IMU Valid: {lf.imu_valid}\n"
@@ -480,7 +573,8 @@ class GroundStation:
                 f"Alt Recovery Count: {lf.alt_recovery_count}\n\n"
                 f"IMU Latched: {lf.imu_latched}\n"
                 f"Alt Latched: {lf.alt_latched}\n\n"
-                f"CSV: {self.csv_path.name if self.csv_path else 'n/a'}"
+                f"CSV: {csv_label}\n"
+                f"Replay Frame: {replay_label}"
             )
         else:
             panel_text = "Waiting for telemetry..."
@@ -497,10 +591,7 @@ class GroundStation:
         self.ax_events.set_title("Event Log")
         self.ax_events.axis("off")
 
-        if len(self.event_lines) == 0:
-            event_text = "Waiting for events..."
-        else:
-            event_text = "\n".join(self.event_lines)
+        event_text = "Waiting for events..." if len(self.event_lines) == 0 else "\n".join(self.event_lines)
 
         self.ax_events.text(
             0.02, 0.98, event_text,
@@ -511,12 +602,17 @@ class GroundStation:
             family="monospace"
         )
 
-        self.fig.suptitle("Flight Computer Ground Station", fontsize=16)
+        mode_label = "REPLAY" if self.replay_mode else "LIVE"
+        self.fig.suptitle(f"Flight Computer Ground Station [{mode_label}]", fontsize=16)
 
     def run(self):
-        self.start_simulator()
-        self.start_reader_thread()
-        self.start_csv_logging()
+        if self.replay_mode:
+            self.load_replay_csv()
+            self.record_event(f"REPLAY    | loaded file: {self.replay_csv_path}")
+        else:
+            self.start_simulator()
+            self.start_reader_thread()
+            self.start_csv_logging()
 
         self.fig = plt.figure(figsize=(15, 9))
         gs = self.fig.add_gridspec(2, 3)
@@ -544,10 +640,10 @@ class GroundStation:
             plt.show()
         finally:
             self.running = False
-            self.stop_csv_logging()
+            if not self.replay_mode:
+                self.stop_csv_logging()
             if self.process and self.process.poll() is None:
                 self.process.terminate()
-
 
 if __name__ == "__main__":
     gs = GroundStation(EXECUTABLE_PATH)
