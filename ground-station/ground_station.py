@@ -1,6 +1,6 @@
 import subprocess
 import sys
-import time
+from tkinter import Tk, filedialog
 import re
 import threading
 import queue
@@ -66,6 +66,13 @@ class GroundStation:
 
         self.reader_thread = None
         self.running = False
+        self.paused = False
+        self.stopped = False
+
+        self.replay_mode = REPLAY_MODE
+        self.replay_csv_path = REPLAY_CSV_PATH
+        self.replay_frames = []
+        self.replay_index = 0
 
         self.times = deque(maxlen=MAX_POINTS)
 
@@ -78,6 +85,9 @@ class GroundStation:
         self.truth_accel_z = deque(maxlen=MAX_POINTS)
 
         self.truth_velocity_z = deque(maxlen=MAX_POINTS)
+
+        self.altitude_error = deque(maxlen=MAX_POINTS)
+        self.accel_z_error = deque(maxlen=MAX_POINTS)
 
         self.latest_frame = None
         self.latest_mode = "UNKNOWN"
@@ -92,7 +102,9 @@ class GroundStation:
 
         self.fig = None
         self.ax_alt = None
+        self.ax_alt_err = None
         self.ax_az = None
+        self.ax_az_err = None
         self.ax_xy = None
         self.ax_status = None
         self.ax_events = None
@@ -103,16 +115,63 @@ class GroundStation:
         self.btn_safe = None
         self.btn_status = None
         self.btn_help = None
+        self.btn_pause = None
+        self.btn_resume = None
+        self.btn_restart = None
+        self.btn_stop = None
+        self.btn_open_replay = None
         self.command_box = None
         self.btn_send = None
 
-        self.altitude_error = deque(maxlen=MAX_POINTS)
-        self.accel_z_error = deque(maxlen=MAX_POINTS)
+    # ---------- Styling ----------
 
-        self.replay_mode = REPLAY_MODE
-        self.replay_csv_path = REPLAY_CSV_PATH
-        self.replay_frames = []
-        self.replay_index = 0
+    def apply_theme(self):
+        plt.rcParams.update({
+            "figure.facecolor": "#0b0f14",
+            "axes.facecolor": "#10161d",
+            "axes.edgecolor": "#3a4654",
+            "axes.labelcolor": "#d9e2ec",
+            "xtick.color": "#9fb3c8",
+            "ytick.color": "#9fb3c8",
+            "text.color": "#e5edf5",
+            "axes.titlecolor": "#f4f7fb",
+            "grid.color": "#2c3846",
+            "legend.facecolor": "#10161d",
+            "legend.edgecolor": "#3a4654",
+            "font.size": 10,
+        })
+
+    @staticmethod
+    def mode_color(mode: str):
+        if mode == "NOMINAL":
+            return "#0f1c14"
+        if mode == "DEGRADED":
+            return "#211a0d"
+        if mode == "SAFE":
+            return "#231012"
+        return "#10161d"
+
+    @staticmethod
+    def mode_line_color(mode: str):
+        if mode == "NOMINAL":
+            return "#33d17a"
+        if mode == "DEGRADED":
+            return "#ffb347"
+        if mode == "SAFE":
+            return "#ff5c5c"
+        return "#7f8c9a"
+
+    @staticmethod
+    def health_status_text(status: int):
+        if status == 0:
+            return "OK"
+        if status == 1:
+            return "WARNING"
+        if status == 2:
+            return "CRITICAL"
+        return "UNKNOWN"
+
+    # ---------- Replay ----------
 
     def load_replay_csv(self):
         csv_path = Path(self.replay_csv_path)
@@ -155,6 +214,9 @@ class GroundStation:
         print(f"Loaded {len(self.replay_frames)} replay frames from {csv_path}")
 
     def consume_replay_frames(self):
+        if self.stopped or self.paused:
+            return
+
         if self.replay_index >= len(self.replay_frames):
             return
 
@@ -164,28 +226,52 @@ class GroundStation:
 
             telemetry = self.replay_frames[self.replay_index]
             self.replay_index += 1
+            self.push_telemetry_frame(telemetry)
 
-            time_s = telemetry.time_ms / 1000.0
+    def restart_replay(self):
+        if not self.replay_mode:
+            self.record_event("OPERATOR  | restart ignored (not in replay mode)")
+            return
 
-            self.times.append(time_s)
+        self.replay_index = 0
+        self.paused = False
+        self.stopped = False
+        self.reset_buffers()
+        self.record_event(f"REPLAY    | restarted: {self.replay_csv_path}")
 
-            self.altitudes.append(telemetry.altitude_m)
-            self.truth_altitudes.append(telemetry.truth_altitude_m)
+    def open_replay_file(self):
+        root = Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
 
-            self.accel_x.append(telemetry.ax)
-            self.accel_y.append(telemetry.ay)
-            self.accel_z.append(telemetry.az)
-            self.truth_accel_z.append(telemetry.truth_acceleration_z_mps2)
+        selected_file = filedialog.askopenfilename(
+            title="Select replay CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
 
-            self.truth_velocity_z.append(telemetry.truth_velocity_z_mps)
+        root.destroy()
 
-            self.altitude_error.append(telemetry.altitude_m - telemetry.truth_altitude_m)
-            self.accel_z_error.append(telemetry.az - telemetry.truth_acceleration_z_mps2)
+        if not selected_file:
+            self.record_event("REPLAY    | file selection cancelled")
+            return
 
-            self.latest_frame = telemetry
-            self.latest_mode = telemetry.mode
+        if self.process and self.process.poll() is None:
+            try:
+                self.process.terminate()
+            except Exception:
+                pass
 
-            self.record_mode_transition_if_needed(telemetry)
+        self.replay_mode = True
+        self.replay_csv_path = selected_file
+        self.running = False
+        self.load_replay_csv()
+        self.replay_index = 0
+        self.paused = False
+        self.stopped = False
+        self.reset_buffers()
+        self.record_event(f"REPLAY    | loaded file: {self.replay_csv_path}")
+
+    # ---------- Live simulator ----------
 
     def start_simulator(self):
         try:
@@ -215,6 +301,8 @@ class GroundStation:
             if not line:
                 break
             self.output_queue.put(line.strip())
+
+    # ---------- Parsing ----------
 
     def parse_telemetry(self, line: str):
         try:
@@ -264,6 +352,25 @@ class GroundStation:
             "message": match.group("message"),
         }
 
+    # ---------- State / buffers ----------
+
+    def reset_buffers(self):
+        self.times.clear()
+        self.altitudes.clear()
+        self.truth_altitudes.clear()
+        self.accel_x.clear()
+        self.accel_y.clear()
+        self.accel_z.clear()
+        self.truth_accel_z.clear()
+        self.truth_velocity_z.clear()
+        self.altitude_error.clear()
+        self.accel_z_error.clear()
+        self.latest_frame = None
+        self.latest_mode = "UNKNOWN"
+        self.mode_transitions.clear()
+        self.last_transition_mode = None
+        self.event_lines.clear()
+
     def record_event(self, text: str):
         self.event_lines.appendleft(text)
 
@@ -274,7 +381,31 @@ class GroundStation:
             self.record_event(f"T+{transition_time_s:6.1f}s | MODE -> {frame.mode}")
             self.last_transition_mode = frame.mode
 
+    def push_telemetry_frame(self, telemetry: TelemetryFrame):
+        time_s = telemetry.time_ms / 1000.0
+
+        self.times.append(time_s)
+        self.altitudes.append(telemetry.altitude_m)
+        self.truth_altitudes.append(telemetry.truth_altitude_m)
+
+        self.accel_x.append(telemetry.ax)
+        self.accel_y.append(telemetry.ay)
+        self.accel_z.append(telemetry.az)
+        self.truth_accel_z.append(telemetry.truth_acceleration_z_mps2)
+
+        self.truth_velocity_z.append(telemetry.truth_velocity_z_mps)
+        self.altitude_error.append(telemetry.altitude_m - telemetry.truth_altitude_m)
+        self.accel_z_error.append(telemetry.az - telemetry.truth_acceleration_z_mps2)
+
+        self.latest_frame = telemetry
+        self.latest_mode = telemetry.mode
+
+        self.record_mode_transition_if_needed(telemetry)
+
     def consume_available_output(self):
+        if self.stopped or self.paused:
+            return
+
         while not self.output_queue.empty():
             line = self.output_queue.get()
             print(f"[SIM] {line}")
@@ -288,57 +419,10 @@ class GroundStation:
             if telemetry is None:
                 continue
 
-            time_s = telemetry.time_ms / 1000.0
-
-            self.times.append(time_s)
-
-            self.altitudes.append(telemetry.altitude_m)
-            self.truth_altitudes.append(telemetry.truth_altitude_m)
-
-            self.accel_x.append(telemetry.ax)
-            self.accel_y.append(telemetry.ay)
-            self.accel_z.append(telemetry.az)
-            self.truth_accel_z.append(telemetry.truth_acceleration_z_mps2)
-
-            self.truth_velocity_z.append(telemetry.truth_velocity_z_mps)
-            self.altitude_error.append(telemetry.altitude_m - telemetry.truth_altitude_m)
-            self.accel_z_error.append(telemetry.az - telemetry.truth_acceleration_z_mps2)
-
-            self.latest_frame = telemetry
-            self.latest_mode = telemetry.mode
-
-            self.record_mode_transition_if_needed(telemetry)
+            self.push_telemetry_frame(telemetry)
             self.log_frame_to_csv(telemetry)
 
-    @staticmethod
-    def mode_color(mode: str):
-        if mode == "NOMINAL":
-            return "#d8f5d0"
-        if mode == "DEGRADED":
-            return "#ffe8bf"
-        if mode == "SAFE":
-            return "#ffd6d6"
-        return "#f0f0f0"
-
-    @staticmethod
-    def mode_line_color(mode: str):
-        if mode == "NOMINAL":
-            return "green"
-        if mode == "DEGRADED":
-            return "orange"
-        if mode == "SAFE":
-            return "red"
-        return "gray"
-
-    @staticmethod
-    def health_status_text(status: int):
-        if status == 0:
-            return "OK"
-        if status == 1:
-            return "WARNING"
-        if status == 2:
-            return "CRITICAL"
-        return "UNKNOWN"
+    # ---------- CSV ----------
 
     def start_csv_logging(self):
         logs_dir = Path("logs")
@@ -408,7 +492,13 @@ class GroundStation:
             self.csv_file = None
             self.csv_writer = None
 
+    # ---------- Commands / controls ----------
+
     def send_command(self, cmd: str):
+        if self.stopped:
+            self.record_event(f"OPERATOR  | command ignored after stop: {cmd}")
+            return
+
         if self.replay_mode:
             self.record_event(f"REPLAY    | command ignored in replay mode: {cmd}")
             return
@@ -443,26 +533,78 @@ class GroundStation:
             self.send_command(cmd)
             self.command_box.set_val("")
 
+    def pause(self):
+        self.paused = True
+        self.record_event("OPERATOR  | paused")
+
+    def resume(self):
+        if self.stopped:
+            self.record_event("OPERATOR  | resume ignored after stop")
+            return
+        self.paused = False
+        self.record_event("OPERATOR  | resumed")
+
+    def stop_execution(self):
+        self.stopped = True
+        self.paused = True
+        self.record_event("OPERATOR  | stopped acquisition/simulation")
+
+        if not self.replay_mode and self.process and self.process.poll() is None:
+            try:
+                self.process.terminate()
+            except Exception:
+                pass
+
+    # ---------- UI ----------
+
     def setup_buttons(self):
-        ax_btn_reset_warn = self.fig.add_axes([0.07, 0.02, 0.11, 0.045])
-        ax_btn_reset_all = self.fig.add_axes([0.19, 0.02, 0.11, 0.045])
-        ax_btn_nominal = self.fig.add_axes([0.31, 0.02, 0.11, 0.045])
-        ax_btn_safe = self.fig.add_axes([0.43, 0.02, 0.11, 0.045])
-        ax_btn_status = self.fig.add_axes([0.55, 0.02, 0.09, 0.045])
-        ax_btn_help = self.fig.add_axes([0.65, 0.02, 0.08, 0.045])
+        button_face = "#17212b"
+        button_hover = "#223041"
 
-        ax_textbox = self.fig.add_axes([0.75, 0.02, 0.15, 0.045])
-        ax_btn_send = self.fig.add_axes([0.91, 0.02, 0.06, 0.045])
+        ax_btn_reset_warn = self.fig.add_axes([0.03, 0.02, 0.09, 0.045])
+        ax_btn_reset_all = self.fig.add_axes([0.13, 0.02, 0.09, 0.045])
+        ax_btn_nominal = self.fig.add_axes([0.23, 0.02, 0.09, 0.045])
+        ax_btn_safe = self.fig.add_axes([0.33, 0.02, 0.09, 0.045])
+        ax_btn_status = self.fig.add_axes([0.43, 0.02, 0.07, 0.045])
+        ax_btn_help = self.fig.add_axes([0.51, 0.02, 0.06, 0.045])
 
-        self.btn_reset_warn = Button(ax_btn_reset_warn, "Reset Warn")
-        self.btn_reset_all = Button(ax_btn_reset_all, "Reset All")
-        self.btn_nominal = Button(ax_btn_nominal, "Force Nom")
-        self.btn_safe = Button(ax_btn_safe, "Force Safe")
-        self.btn_status = Button(ax_btn_status, "Status")
-        self.btn_help = Button(ax_btn_help, "Help")
+        ax_btn_pause = self.fig.add_axes([0.58, 0.02, 0.07, 0.045])
+        ax_btn_resume = self.fig.add_axes([0.66, 0.02, 0.07, 0.045])
+        ax_btn_restart = self.fig.add_axes([0.74, 0.02, 0.07, 0.045])
+        ax_btn_stop = self.fig.add_axes([0.82, 0.02, 0.06, 0.045])
+        ax_btn_open = self.fig.add_axes([0.89, 0.02, 0.08, 0.045])
+
+        ax_textbox = self.fig.add_axes([0.58, 0.075, 0.28, 0.04])
+        ax_btn_send = self.fig.add_axes([0.87, 0.075, 0.10, 0.04])
+
+        for ax in [ax_btn_reset_warn, ax_btn_reset_all, ax_btn_nominal, ax_btn_safe,
+                   ax_btn_status, ax_btn_help, ax_btn_pause, ax_btn_resume,
+                   ax_btn_restart, ax_btn_stop, ax_btn_open, ax_textbox, ax_btn_send]:
+            ax.set_facecolor(button_face)
+
+        self.btn_reset_warn = Button(ax_btn_reset_warn, "Reset Warn", color=button_face, hovercolor=button_hover)
+        self.btn_reset_all = Button(ax_btn_reset_all, "Reset All", color=button_face, hovercolor=button_hover)
+        self.btn_nominal = Button(ax_btn_nominal, "Force Nom", color=button_face, hovercolor=button_hover)
+        self.btn_safe = Button(ax_btn_safe, "Force Safe", color=button_face, hovercolor=button_hover)
+        self.btn_status = Button(ax_btn_status, "Status", color=button_face, hovercolor=button_hover)
+        self.btn_help = Button(ax_btn_help, "Help", color=button_face, hovercolor=button_hover)
+
+        self.btn_pause = Button(ax_btn_pause, "Pause", color=button_face, hovercolor=button_hover)
+        self.btn_resume = Button(ax_btn_resume, "Resume", color=button_face, hovercolor=button_hover)
+        self.btn_restart = Button(ax_btn_restart, "Restart", color=button_face, hovercolor=button_hover)
+        self.btn_stop = Button(ax_btn_stop, "Stop", color=button_face, hovercolor=button_hover)
+        self.btn_open_replay = Button(ax_btn_open, "Open CSV", color=button_face, hovercolor=button_hover)
 
         self.command_box = TextBox(ax_textbox, "", initial="")
-        self.btn_send = Button(ax_btn_send, "Send")
+        self.btn_send = Button(ax_btn_send, "Send", color=button_face, hovercolor=button_hover)
+
+        for btn in [
+            self.btn_reset_warn, self.btn_reset_all, self.btn_nominal, self.btn_safe,
+            self.btn_status, self.btn_help, self.btn_pause, self.btn_resume,
+            self.btn_restart, self.btn_stop, self.btn_open_replay, self.btn_send
+        ]:
+            btn.label.set_color("#e6eef7")
+            btn.label.set_fontsize(9)
 
         self.btn_reset_warn.on_clicked(lambda event: self.send_command("reset_warnings"))
         self.btn_reset_all.on_clicked(lambda event: self.send_command("reset_all"))
@@ -470,6 +612,12 @@ class GroundStation:
         self.btn_safe.on_clicked(lambda event: self.send_command("force_safe"))
         self.btn_status.on_clicked(lambda event: self.send_command("status"))
         self.btn_help.on_clicked(lambda event: self.send_command("help"))
+
+        self.btn_pause.on_clicked(lambda event: self.pause())
+        self.btn_resume.on_clicked(lambda event: self.resume())
+        self.btn_restart.on_clicked(lambda event: self.restart_replay())
+        self.btn_stop.on_clicked(lambda event: self.stop_execution())
+        self.btn_open_replay.on_clicked(lambda event: self.open_replay_file())
 
         self.btn_send.on_clicked(self.on_send_command)
         self.command_box.on_submit(self.on_submit_command)
@@ -500,112 +648,124 @@ class GroundStation:
         self.ax_alt.set_facecolor(bg_color)
         self.ax_az.set_facecolor(bg_color)
         self.ax_xy.set_facecolor(bg_color)
-        self.ax_status.set_facecolor(bg_color)
-        self.ax_events.set_facecolor("#f7f7f7")
+        self.ax_status.set_facecolor("#10161d")
+        self.ax_events.set_facecolor("#10161d")
 
         if len(self.times) > 0:
-            self.ax_alt.plot(self.times, self.altitudes, label="Measured Altitude [m]")
-            self.ax_alt.plot(self.times, self.truth_altitudes, label="Truth Altitude [m]")
-            self.ax_alt_err.plot(self.times, self.altitude_error, linestyle=":", label="Altitude Error [m]")
+            self.ax_alt.plot(self.times, self.altitudes, label="Measured Altitude [m]", linewidth=2.0)
+            self.ax_alt.plot(self.times, self.truth_altitudes, label="Truth Altitude [m]", linewidth=1.8, linestyle="--")
+            self.ax_alt_err.plot(self.times, self.altitude_error, linestyle=":", linewidth=1.4, label="Altitude Error [m]")
 
-            self.ax_az.plot(self.times, self.accel_z, label="Measured Accel Z [m/s²]")
-            self.ax_az.plot(self.times, self.truth_accel_z, label="Truth Accel Z [m/s²]")
-            self.ax_az_err.plot(self.times, self.accel_z_error, linestyle=":", label="Accel Z Error [m/s²]")
+            self.ax_az.plot(self.times, self.accel_z, label="Measured Accel Z [m/s²]", linewidth=2.0)
+            self.ax_az.plot(self.times, self.truth_accel_z, label="Truth Accel Z [m/s²]", linewidth=1.8, linestyle="--")
+            self.ax_az_err.plot(self.times, self.accel_z_error, linestyle=":", linewidth=1.4, label="Accel Z Error [m/s²]")
 
-            self.ax_xy.plot(self.times, self.accel_x, label="Measured Accel X [m/s²]")
-            self.ax_xy.plot(self.times, self.accel_y, label="Measured Accel Y [m/s²]")
+            self.ax_xy.plot(self.times, self.accel_x, label="Measured Accel X [m/s²]", linewidth=1.8)
+            self.ax_xy.plot(self.times, self.accel_y, label="Measured Accel Y [m/s²]", linewidth=1.8)
 
         self.draw_mode_transition_lines()
 
-        self.ax_alt.set_title(f"Altitude | Mode: {self.latest_mode}")
+        self.ax_alt.set_title(f"ALTITUDE / MODE: {self.latest_mode}")
         self.ax_alt.set_xlabel("Time [s]")
         self.ax_alt.set_ylabel("Altitude [m]")
-        self.ax_alt.grid(True)
+        self.ax_alt.grid(True, alpha=0.35)
         alt_lines, alt_labels = self.ax_alt.get_legend_handles_labels()
         alt_err_lines, alt_err_labels = self.ax_alt_err.get_legend_handles_labels()
-        self.ax_alt.legend(alt_lines + alt_err_lines, alt_labels + alt_err_labels, loc="upper left")
+        self.ax_alt.legend(alt_lines + alt_err_lines, alt_labels + alt_err_labels, loc="upper left", fontsize=8)
         self.ax_alt_err.set_ylabel("Altitude Error [m]")
         self.ax_alt_err.grid(False)
 
-        self.ax_az.set_title("Accel Z | Truth vs Measured")
+        self.ax_az.set_title("ACCEL Z / TRUTH VS MEASURED")
         self.ax_az.set_xlabel("Time [s]")
         self.ax_az.set_ylabel("Accel Z [m/s²]")
-        self.ax_az.grid(True)
+        self.ax_az.grid(True, alpha=0.35)
         az_lines, az_labels = self.ax_az.get_legend_handles_labels()
         az_err_lines, az_err_labels = self.ax_az_err.get_legend_handles_labels()
-        self.ax_az.legend(az_lines + az_err_lines, az_labels + az_err_labels, loc="upper left")
+        self.ax_az.legend(az_lines + az_err_lines, az_labels + az_err_labels, loc="upper left", fontsize=8)
         self.ax_az_err.set_ylabel("Accel Z Error [m/s²]")
         self.ax_az_err.grid(False)
 
-        self.ax_xy.set_title("Measured Accel X / Y")
+        self.ax_xy.set_title("ACCEL X / Y")
         self.ax_xy.set_xlabel("Time [s]")
         self.ax_xy.set_ylabel("Acceleration [m/s²]")
-        self.ax_xy.grid(True)
-        self.ax_xy.legend(loc="upper left")
+        self.ax_xy.grid(True, alpha=0.35)
+        self.ax_xy.legend(loc="upper left", fontsize=8)
 
-        self.ax_status.set_title("System Status")
+        self.ax_status.set_title("SYSTEM STATUS")
         self.ax_status.axis("off")
 
         if self.latest_frame is not None:
             lf = self.latest_frame
             status_text = self.health_status_text(lf.health_status)
-
+            execution_state = "STOPPED" if self.stopped else ("PAUSED" if self.paused else "RUNNING")
             csv_label = self.csv_path.name if self.csv_path else "n/a"
             replay_label = f"{self.replay_index}/{len(self.replay_frames)}" if self.replay_mode else "LIVE"
+            source_label = self.replay_csv_path if self.replay_mode else csv_label
 
             panel_text = (
-                f"Mode: {lf.mode}\n"
-                f"Mission Phase: {lf.mission_phase}\n"
-                f"Mission Time: {lf.time_ms / 1000.0:.1f} s\n\n"
-                f"Truth Altitude: {lf.truth_altitude_m:.2f} m\n"
-                f"Truth Vel Z: {lf.truth_velocity_z_mps:.2f} m/s\n"
-                f"Truth Accel Z: {lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
-                f"Measured Altitude: {lf.altitude_m:.2f} m\n"
-                f"Measured Accel Z: {lf.az:.2f} m/s²\n"
-                f"Altitude Error: {lf.altitude_m - lf.truth_altitude_m:.2f} m\n"
-                f"Accel Z Error: {lf.az - lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
-                f"IMU Valid: {lf.imu_valid}\n"
-                f"Altimeter Valid: {lf.alt_valid}\n"
-                f"Health Status: {status_text}\n\n"
-                f"IMU Fault Count: {lf.imu_fault_count}\n"
-                f"IMU Recovery Count: {lf.imu_recovery_count}\n"
-                f"Alt Fault Count: {lf.alt_fault_count}\n"
-                f"Alt Recovery Count: {lf.alt_recovery_count}\n\n"
-                f"IMU Latched: {lf.imu_latched}\n"
-                f"Alt Latched: {lf.alt_latched}\n\n"
-                f"CSV: {csv_label}\n"
-                f"Replay Frame: {replay_label}"
+                f"MODE:            {lf.mode}\n"
+                f"EXECUTION:       {execution_state}\n"
+                f"PHASE:           {lf.mission_phase}\n"
+                f"TIME:            {lf.time_ms / 1000.0:.1f} s\n\n"
+                f"TRUTH ALT:       {lf.truth_altitude_m:.2f} m\n"
+                f"TRUTH VEL Z:     {lf.truth_velocity_z_mps:.2f} m/s\n"
+                f"TRUTH ACCEL Z:   {lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
+                f"MEAS ALT:        {lf.altitude_m:.2f} m\n"
+                f"MEAS ACCEL Z:    {lf.az:.2f} m/s²\n"
+                f"ALT ERROR:       {lf.altitude_m - lf.truth_altitude_m:.2f} m\n"
+                f"ACCEL ERROR:     {lf.az - lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
+                f"IMU VALID:       {lf.imu_valid}\n"
+                f"ALT VALID:       {lf.alt_valid}\n"
+                f"HEALTH:          {status_text}\n\n"
+                f"IMU FAULT CNT:   {lf.imu_fault_count}\n"
+                f"IMU REC CNT:     {lf.imu_recovery_count}\n"
+                f"ALT FAULT CNT:   {lf.alt_fault_count}\n"
+                f"ALT REC CNT:     {lf.alt_recovery_count}\n\n"
+                f"IMU LATCHED:     {lf.imu_latched}\n"
+                f"ALT LATCHED:     {lf.alt_latched}\n\n"
+                f"SOURCE:          {source_label}\n"
+                f"CSV:             {csv_label}\n"
+                f"REPLAY FRAME:    {replay_label}"
             )
         else:
-            panel_text = "Waiting for telemetry..."
+            panel_text = "WAITING FOR TELEMETRY..."
 
         self.ax_status.text(
             0.03, 0.97, panel_text,
             transform=self.ax_status.transAxes,
             va="top",
             ha="left",
-            fontsize=10.0,
-            family="monospace"
+            fontsize=9.5,
+            family="monospace",
+            color="#e8eef5"
         )
 
-        self.ax_events.set_title("Event Log")
+        self.ax_events.set_title("EVENT LOG")
         self.ax_events.axis("off")
 
-        event_text = "Waiting for events..." if len(self.event_lines) == 0 else "\n".join(self.event_lines)
+        event_text = "WAITING FOR EVENTS..." if len(self.event_lines) == 0 else "\n".join(self.event_lines)
 
         self.ax_events.text(
             0.02, 0.98, event_text,
             transform=self.ax_events.transAxes,
             va="top",
             ha="left",
-            fontsize=9.0,
-            family="monospace"
+            fontsize=8.8,
+            family="monospace",
+            color="#d7e2ee"
         )
 
         mode_label = "REPLAY" if self.replay_mode else "LIVE"
-        self.fig.suptitle(f"Flight Computer Ground Station [{mode_label}]", fontsize=16)
+        self.fig.suptitle(
+            f"FLIGHT COMPUTER GROUND STATION  [{mode_label}]",
+            fontsize=16,
+            fontweight="bold",
+            color="#f5f8fb"
+        )
 
     def run(self):
+        self.apply_theme()
+
         if self.replay_mode:
             self.load_replay_csv()
             self.record_event(f"REPLAY    | loaded file: {self.replay_csv_path}")
@@ -636,7 +796,7 @@ class GroundStation:
         )
 
         try:
-            self.fig.subplots_adjust(left=0.05, right=0.98, top=0.92, bottom=0.12, wspace=0.28, hspace=0.30)
+            self.fig.subplots_adjust(left=0.05, right=0.98, top=0.92, bottom=0.16, wspace=0.28, hspace=0.30)
             plt.show()
         finally:
             self.running = False
@@ -644,6 +804,7 @@ class GroundStation:
                 self.stop_csv_logging()
             if self.process and self.process.poll() is None:
                 self.process.terminate()
+
 
 if __name__ == "__main__":
     gs = GroundStation(EXECUTABLE_PATH)
