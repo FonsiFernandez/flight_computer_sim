@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, TextBox
 
+
 EXECUTABLE_PATH = r"C:\Users\Alfonso.Fernandez\CLionProjects\flight-computer-sim\flight-software\cmake-build-debug\flight_computer_sim.exe"
 
 LOG_LINE_PATTERN = re.compile(
@@ -50,6 +51,7 @@ class TelemetryFrame:
     alt_latched: int
     health_status: int
 
+
 class GroundStation:
     def __init__(self, executable_path: str):
         self.executable_path = executable_path
@@ -61,10 +63,16 @@ class GroundStation:
         self.running = False
 
         self.times = deque(maxlen=MAX_POINTS)
+
         self.altitudes = deque(maxlen=MAX_POINTS)
+        self.truth_altitudes = deque(maxlen=MAX_POINTS)
+
         self.accel_x = deque(maxlen=MAX_POINTS)
         self.accel_y = deque(maxlen=MAX_POINTS)
         self.accel_z = deque(maxlen=MAX_POINTS)
+        self.truth_accel_z = deque(maxlen=MAX_POINTS)
+
+        self.truth_velocity_z = deque(maxlen=MAX_POINTS)
 
         self.latest_frame = None
         self.latest_mode = "UNKNOWN"
@@ -93,9 +101,8 @@ class GroundStation:
         self.command_box = None
         self.btn_send = None
 
-        self.truth_altitudes = deque(maxlen=MAX_POINTS)
-        self.truth_accel_z = deque(maxlen=MAX_POINTS)
-        self.truth_velocity_z = deque(maxlen=MAX_POINTS)
+        self.altitude_error = deque(maxlen=MAX_POINTS)
+        self.accel_z_error = deque(maxlen=MAX_POINTS)
 
     def start_simulator(self):
         try:
@@ -201,17 +208,21 @@ class GroundStation:
             time_s = telemetry.time_ms / 1000.0
 
             self.times.append(time_s)
+
             self.altitudes.append(telemetry.altitude_m)
+            self.truth_altitudes.append(telemetry.truth_altitude_m)
+
             self.accel_x.append(telemetry.ax)
             self.accel_y.append(telemetry.ay)
             self.accel_z.append(telemetry.az)
+            self.truth_accel_z.append(telemetry.truth_acceleration_z_mps2)
+
+            self.truth_velocity_z.append(telemetry.truth_velocity_z_mps)
+            self.altitude_error.append(telemetry.altitude_m - telemetry.truth_altitude_m)
+            self.accel_z_error.append(telemetry.az - telemetry.truth_acceleration_z_mps2)
 
             self.latest_frame = telemetry
             self.latest_mode = telemetry.mode
-
-            self.truth_altitudes.append(telemetry.truth_altitude_m)
-            self.truth_accel_z.append(telemetry.truth_acceleration_z_mps2)
-            self.truth_velocity_z.append(telemetry.truth_velocity_z_mps)
 
             self.record_mode_transition_if_needed(telemetry)
             self.log_frame_to_csv(telemetry)
@@ -259,6 +270,11 @@ class GroundStation:
         self.csv_writer.writerow([
             "time_ms",
             "mode",
+            "mission_phase",
+            "truth_time_s",
+            "truth_altitude_m",
+            "truth_velocity_z_mps",
+            "truth_acceleration_z_mps2",
             "ax",
             "ay",
             "az",
@@ -281,6 +297,11 @@ class GroundStation:
         self.csv_writer.writerow([
             frame.time_ms,
             frame.mode,
+            frame.mission_phase,
+            frame.truth_time_s,
+            frame.truth_altitude_m,
+            frame.truth_velocity_z_mps,
+            frame.truth_acceleration_z_mps2,
             frame.ax,
             frame.ay,
             frame.az,
@@ -377,7 +398,9 @@ class GroundStation:
         self.consume_available_output()
 
         self.ax_alt.clear()
+        self.ax_alt_err.clear()
         self.ax_az.clear()
+        self.ax_az_err.clear()
         self.ax_xy.clear()
         self.ax_status.clear()
         self.ax_events.clear()
@@ -393,10 +416,14 @@ class GroundStation:
         if len(self.times) > 0:
             self.ax_alt.plot(self.times, self.altitudes, label="Measured Altitude [m]")
             self.ax_alt.plot(self.times, self.truth_altitudes, label="Truth Altitude [m]")
+            self.ax_alt_err.plot(self.times, self.altitude_error, linestyle=":", label="Altitude Error [m]")
+
             self.ax_az.plot(self.times, self.accel_z, label="Measured Accel Z [m/s²]")
             self.ax_az.plot(self.times, self.truth_accel_z, label="Truth Accel Z [m/s²]")
-            self.ax_xy.plot(self.times, self.accel_x, label="Accel X [m/s²]")
-            self.ax_xy.plot(self.times, self.accel_y, label="Accel Y [m/s²]")
+            self.ax_az_err.plot(self.times, self.accel_z_error, linestyle=":", label="Accel Z Error [m/s²]")
+
+            self.ax_xy.plot(self.times, self.accel_x, label="Measured Accel X [m/s²]")
+            self.ax_xy.plot(self.times, self.accel_y, label="Measured Accel Y [m/s²]")
 
         self.draw_mode_transition_lines()
 
@@ -404,15 +431,23 @@ class GroundStation:
         self.ax_alt.set_xlabel("Time [s]")
         self.ax_alt.set_ylabel("Altitude [m]")
         self.ax_alt.grid(True)
-        self.ax_alt.legend(loc="upper left")
+        alt_lines, alt_labels = self.ax_alt.get_legend_handles_labels()
+        alt_err_lines, alt_err_labels = self.ax_alt_err.get_legend_handles_labels()
+        self.ax_alt.legend(alt_lines + alt_err_lines, alt_labels + alt_err_labels, loc="upper left")
+        self.ax_alt_err.set_ylabel("Altitude Error [m]")
+        self.ax_alt_err.grid(False)
 
-        self.ax_az.set_title("Accel Z")
+        self.ax_az.set_title("Accel Z | Truth vs Measured")
         self.ax_az.set_xlabel("Time [s]")
         self.ax_az.set_ylabel("Accel Z [m/s²]")
         self.ax_az.grid(True)
-        self.ax_az.legend(loc="upper left")
+        az_lines, az_labels = self.ax_az.get_legend_handles_labels()
+        az_err_lines, az_err_labels = self.ax_az_err.get_legend_handles_labels()
+        self.ax_az.legend(az_lines + az_err_lines, az_labels + az_err_labels, loc="upper left")
+        self.ax_az_err.set_ylabel("Accel Z Error [m/s²]")
+        self.ax_az_err.grid(False)
 
-        self.ax_xy.set_title("Accel X / Y")
+        self.ax_xy.set_title("Measured Accel X / Y")
         self.ax_xy.set_xlabel("Time [s]")
         self.ax_xy.set_ylabel("Acceleration [m/s²]")
         self.ax_xy.grid(True)
@@ -427,7 +462,15 @@ class GroundStation:
 
             panel_text = (
                 f"Mode: {lf.mode}\n"
+                f"Mission Phase: {lf.mission_phase}\n"
                 f"Mission Time: {lf.time_ms / 1000.0:.1f} s\n\n"
+                f"Truth Altitude: {lf.truth_altitude_m:.2f} m\n"
+                f"Truth Vel Z: {lf.truth_velocity_z_mps:.2f} m/s\n"
+                f"Truth Accel Z: {lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
+                f"Measured Altitude: {lf.altitude_m:.2f} m\n"
+                f"Measured Accel Z: {lf.az:.2f} m/s²\n\n"
+                f"Altitude Error: {lf.altitude_m - lf.truth_altitude_m:.2f} m\n"
+                f"Accel Z Error: {lf.az - lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
                 f"IMU Valid: {lf.imu_valid}\n"
                 f"Altimeter Valid: {lf.alt_valid}\n"
                 f"Health Status: {status_text}\n\n"
@@ -437,14 +480,7 @@ class GroundStation:
                 f"Alt Recovery Count: {lf.alt_recovery_count}\n\n"
                 f"IMU Latched: {lf.imu_latched}\n"
                 f"Alt Latched: {lf.alt_latched}\n\n"
-                f"Latest Altitude: {lf.altitude_m:.2f} m\n"
-                f"Latest Accel Z: {lf.az:.2f} m/s²\n\n"
                 f"CSV: {self.csv_path.name if self.csv_path else 'n/a'}"
-                f"Mission Phase: {lf.mission_phase}\n"
-                f"Mission Time: {lf.time_ms / 1000.0:.1f} s\n\n"
-                f"Truth Altitude: {lf.truth_altitude_m:.2f} m\n"
-                f"Truth Vel Z: {lf.truth_velocity_z_mps:.2f} m/s\n"
-                f"Truth Accel Z: {lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
             )
         else:
             panel_text = "Waiting for telemetry..."
@@ -454,7 +490,7 @@ class GroundStation:
             transform=self.ax_status.transAxes,
             va="top",
             ha="left",
-            fontsize=10.5,
+            fontsize=10.0,
             family="monospace"
         )
 
@@ -471,7 +507,7 @@ class GroundStation:
             transform=self.ax_events.transAxes,
             va="top",
             ha="left",
-            fontsize=9.5,
+            fontsize=9.0,
             family="monospace"
         )
 
@@ -490,6 +526,9 @@ class GroundStation:
         self.ax_xy = self.fig.add_subplot(gs[1, 0])
         self.ax_status = self.fig.add_subplot(gs[1, 1])
         self.ax_events = self.fig.add_subplot(gs[:, 2])
+
+        self.ax_alt_err = self.ax_alt.twinx()
+        self.ax_az_err = self.ax_az.twinx()
 
         self.setup_buttons()
 
