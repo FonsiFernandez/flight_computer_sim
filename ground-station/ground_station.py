@@ -31,6 +31,11 @@ MAX_EVENTS = 14
 class TelemetryFrame:
     time_ms: int
     mode: str
+    mission_phase: str
+    truth_time_s: float
+    truth_altitude_m: float
+    truth_velocity_z_mps: float
+    truth_acceleration_z_mps2: float
     ax: float
     ay: float
     az: float
@@ -44,7 +49,6 @@ class TelemetryFrame:
     imu_latched: int
     alt_latched: int
     health_status: int
-
 
 class GroundStation:
     def __init__(self, executable_path: str):
@@ -89,6 +93,10 @@ class GroundStation:
         self.command_box = None
         self.btn_send = None
 
+        self.truth_altitudes = deque(maxlen=MAX_POINTS)
+        self.truth_accel_z = deque(maxlen=MAX_POINTS)
+        self.truth_velocity_z = deque(maxlen=MAX_POINTS)
+
     def start_simulator(self):
         try:
             self.process = subprocess.Popen(
@@ -127,6 +135,7 @@ class GroundStation:
         if data.get("type") != "telemetry":
             return None
 
+        truth = data.get("truth", {})
         imu = data.get("imu", {})
         altimeter = data.get("altimeter", {})
         health = data.get("health", {})
@@ -134,6 +143,11 @@ class GroundStation:
         return TelemetryFrame(
             time_ms=int(data.get("time_ms", 0)),
             mode=str(data.get("mode", "UNKNOWN")),
+            mission_phase=str(data.get("mission_phase", "UNKNOWN")),
+            truth_time_s=float(truth.get("time_s", 0.0)),
+            truth_altitude_m=float(truth.get("altitude_m", 0.0)),
+            truth_velocity_z_mps=float(truth.get("velocity_z_mps", 0.0)),
+            truth_acceleration_z_mps2=float(truth.get("acceleration_z_mps2", 0.0)),
             ax=float(imu.get("x", 0.0)),
             ay=float(imu.get("y", 0.0)),
             az=float(imu.get("z", 0.0)),
@@ -194,6 +208,10 @@ class GroundStation:
 
             self.latest_frame = telemetry
             self.latest_mode = telemetry.mode
+
+            self.truth_altitudes.append(telemetry.truth_altitude_m)
+            self.truth_accel_z.append(telemetry.truth_acceleration_z_mps2)
+            self.truth_velocity_z.append(telemetry.truth_velocity_z_mps)
 
             self.record_mode_transition_if_needed(telemetry)
             self.log_frame_to_csv(telemetry)
@@ -373,8 +391,10 @@ class GroundStation:
         self.ax_events.set_facecolor("#f7f7f7")
 
         if len(self.times) > 0:
-            self.ax_alt.plot(self.times, self.altitudes, label="Altitude [m]")
-            self.ax_az.plot(self.times, self.accel_z, label="Accel Z [m/s²]")
+            self.ax_alt.plot(self.times, self.altitudes, label="Measured Altitude [m]")
+            self.ax_alt.plot(self.times, self.truth_altitudes, label="Truth Altitude [m]")
+            self.ax_az.plot(self.times, self.accel_z, label="Measured Accel Z [m/s²]")
+            self.ax_az.plot(self.times, self.truth_accel_z, label="Truth Accel Z [m/s²]")
             self.ax_xy.plot(self.times, self.accel_x, label="Accel X [m/s²]")
             self.ax_xy.plot(self.times, self.accel_y, label="Accel Y [m/s²]")
 
@@ -420,6 +440,11 @@ class GroundStation:
                 f"Latest Altitude: {lf.altitude_m:.2f} m\n"
                 f"Latest Accel Z: {lf.az:.2f} m/s²\n\n"
                 f"CSV: {self.csv_path.name if self.csv_path else 'n/a'}"
+                f"Mission Phase: {lf.mission_phase}\n"
+                f"Mission Time: {lf.time_ms / 1000.0:.1f} s\n\n"
+                f"Truth Altitude: {lf.truth_altitude_m:.2f} m\n"
+                f"Truth Vel Z: {lf.truth_velocity_z_mps:.2f} m/s\n"
+                f"Truth Accel Z: {lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
             )
         else:
             panel_text = "Waiting for telemetry..."

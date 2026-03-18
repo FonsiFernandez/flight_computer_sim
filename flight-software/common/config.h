@@ -17,4 +17,17 @@
 #define ALT_WARNING_THRESHOLD              3
 #define ALT_RECOVERY_THRESHOLD             3
 
+#define VEHICLE_DT_S                       0.5f
+
+#define IMU_BIAS_X                         0.02f
+#define IMU_BIAS_Y                        -0.01f
+#define IMU_BIAS_Z                         0.05f
+
+#define IMU_NOISE_X                        0.03f
+#define IMU_NOISE_Y                        0.03f
+#define IMU_NOISE_Z                        0.05f
+
+#define ALTIMETER_BIAS_M                   1.20f
+#define ALTIMETER_NOISE_M                  0.60f
+
 #endif

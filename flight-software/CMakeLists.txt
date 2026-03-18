@@ -16,6 +16,7 @@ add_executable(flight_computer_sim
         services/telemetry.c
         services/fault_manager.c
         comms/command.c
+        simulation/vehicle_model.c
 )
 
 target_include_directories(flight_computer_sim PRIVATE
@@ -43,6 +44,7 @@ add_executable(flight_computer_tests
         services/health_monitor.c
         services/fault_manager.c
         comms/command.c
+        simulation/vehicle_model.c
 )
 
 target_include_directories(flight_computer_tests PRIVATE

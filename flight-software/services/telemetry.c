@@ -4,8 +4,13 @@
 
 #include <stdio.h>
 
-void telemetry_send(uint64_t elapsed_ms, system_mode_t mode, imu_data_t imu, altimeter_data_t alt) {
-    char buffer[1024];
+void telemetry_send(uint64_t elapsed_ms,
+                    system_mode_t mode,
+                    imu_data_t imu,
+                    altimeter_data_t alt,
+                    const vehicle_truth_t* truth,
+                    const char* mission_phase) {
+    char buffer[1400];
     const health_monitor_data_t* hm = health_monitor_get_data();
 
     const char* mode_str = "UNKNOWN";
@@ -31,6 +36,13 @@ void telemetry_send(uint64_t elapsed_ms, system_mode_t mode, imu_data_t imu, alt
              "\"type\":\"telemetry\","
              "\"time_ms\":%llu,"
              "\"mode\":\"%s\","
+             "\"mission_phase\":\"%s\","
+             "\"truth\":{"
+                 "\"time_s\":%.2f,"
+                 "\"altitude_m\":%.2f,"
+                 "\"velocity_z_mps\":%.2f,"
+                 "\"acceleration_z_mps2\":%.2f"
+             "},"
              "\"imu\":{"
                  "\"x\":%.2f,"
                  "\"y\":%.2f,"
@@ -53,6 +65,11 @@ void telemetry_send(uint64_t elapsed_ms, system_mode_t mode, imu_data_t imu, alt
              "}",
              (unsigned long long)elapsed_ms,
              mode_str,
+             mission_phase,
+             truth->time_s,
+             truth->altitude_m,
+             truth->velocity_z_mps,
+             truth->acceleration_z_mps2,
              imu.accel_x,
              imu.accel_y,
              imu.accel_z,

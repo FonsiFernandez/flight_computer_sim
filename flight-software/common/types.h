@@ -4,6 +4,13 @@
 #include <stdbool.h>
 
 typedef struct {
+    float time_s;
+    float altitude_m;
+    float velocity_z_mps;
+    float acceleration_z_mps2;
+} vehicle_truth_t;
+
+typedef struct {
     float accel_x;
     float accel_y;
     float accel_z;

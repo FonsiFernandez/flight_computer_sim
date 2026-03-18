@@ -8,6 +8,7 @@
 #include "services/telemetry.h"
 #include "services/fault_manager.h"
 #include "comms/command.h"
+#include "simulation/vehicle_model.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -63,6 +64,7 @@ int main(void) {
     health_monitor_init();
     fault_manager_init();
     command_init();
+    vehicle_model_init();
 
     state_machine_set_mode(MODE_NOMINAL);
     logger_info("System entered NOMINAL mode");
@@ -72,6 +74,7 @@ int main(void) {
     bool running = true;
 
     while (running) {
+        vehicle_model_step(VEHICLE_DT_S);
         command_t cmd = command_poll();
         if (cmd.type == COMMAND_QUIT) {
             process_command(cmd);
@@ -106,7 +109,9 @@ int main(void) {
             last_mode = current_mode;
         }
 
-        telemetry_send(elapsed, current_mode, imu, alt);
+        const vehicle_truth_t* truth = vehicle_model_get_truth();
+        const char* mission_phase = vehicle_model_get_phase();
+        telemetry_send(elapsed, current_mode, imu, alt, truth, mission_phase);
 
         switch (current_mode) {
             case MODE_SAFE:
