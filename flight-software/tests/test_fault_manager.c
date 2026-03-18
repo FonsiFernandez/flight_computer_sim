@@ -1,7 +1,7 @@
-#include "fault_manager.h"
-#include "health_monitor.h"
-#include "state_machine.h"
-#include "types.h"
+#include "services/fault_manager.h"
+#include "services/health_monitor.h"
+#include "app/state_machine.h"
+#include "common/types.h"
 #include "test_utils.h"
 
 void test_fault_manager_warning_moves_to_degraded(void) {

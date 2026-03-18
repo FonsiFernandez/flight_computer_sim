@@ -1,5 +1,5 @@
-#include "state_machine.h"
-#include "types.h"
+#include "app/state_machine.h"
+#include "common/types.h"
 #include "test_utils.h"
 
 void test_state_machine_init_sets_init_mode(void) {

@@ -4,16 +4,6 @@ project(flight_computer_sim C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-include_directories(
-        .
-        bsp
-        drivers
-        common
-        app
-        services
-        comms
-)
-
 add_executable(flight_computer_sim
         main.c
         bsp/time_port.c
@@ -26,6 +16,16 @@ add_executable(flight_computer_sim
         services/telemetry.c
         services/fault_manager.c
         comms/command.c
+)
+
+target_include_directories(flight_computer_sim PRIVATE
+        .
+        common
+        bsp
+        drivers
+        app
+        services
+        comms
 )
 
 target_link_libraries(flight_computer_sim m)
@@ -47,10 +47,6 @@ add_executable(flight_computer_tests
 
 target_include_directories(flight_computer_tests PRIVATE
         .
-        common
-        app
-        services
-        comms
 )
 
 add_test(NAME flight_computer_tests COMMAND flight_computer_tests)

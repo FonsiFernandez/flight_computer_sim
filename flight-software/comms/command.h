@@ -1,7 +1,7 @@
 #ifndef COMMAND_H
 #define COMMAND_H
 
-#include "types.h"
+#include "common/types.h"
 
 void command_init(void);
 command_t command_poll(void);

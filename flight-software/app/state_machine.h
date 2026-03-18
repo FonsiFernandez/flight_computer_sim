@@ -1,7 +1,7 @@
 #ifndef STATE_MACHINE_H
 #define STATE_MACHINE_H
 
-#include "types.h"
+#include "common/types.h"
 
 void state_machine_init(void);
 system_mode_t state_machine_get_mode(void);

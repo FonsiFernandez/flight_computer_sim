@@ -1,7 +1,7 @@
 #ifndef HEALTH_MONITOR_H
 #define HEALTH_MONITOR_H
 
-#include "types.h"
+#include "common/types.h"
 
 void health_monitor_init(void);
 health_status_t health_monitor_update(imu_data_t imu, altimeter_data_t alt);

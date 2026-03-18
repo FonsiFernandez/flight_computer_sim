@@ -1,5 +1,5 @@
 #include "health_monitor.h"
-#include "config.h"
+#include "common/config.h"
 
 static health_monitor_data_t hm;
 

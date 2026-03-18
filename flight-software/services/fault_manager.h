@@ -1,7 +1,7 @@
 #ifndef FAULT_MANAGER_H
 #define FAULT_MANAGER_H
 
-#include "types.h"
+#include "common/types.h"
 
 void fault_manager_init(void);
 system_mode_t fault_manager_update(health_status_t health, system_mode_t current_mode);

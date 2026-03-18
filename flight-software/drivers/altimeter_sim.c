@@ -1,5 +1,5 @@
 #include "altimeter_sim.h"
-#include "config.h"
+#include "common/config.h"
 
 static float altitude = 0.0f;
 static int sample_count = 0;

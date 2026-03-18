@@ -1,6 +1,6 @@
 # Flight Computer Simulation (Embedded Systems – Aerospace Focus)
 
-![img.png](res/img.png)
+![img.png](flight-software/res/img.png)
 
 ## Overview
 

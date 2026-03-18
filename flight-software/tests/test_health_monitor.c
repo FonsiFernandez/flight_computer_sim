@@ -1,6 +1,6 @@
-#include "health_monitor.h"
-#include "config.h"
-#include "types.h"
+#include "services/health_monitor.h"
+#include "common/config.h"
+#include "common/types.h"
 #include "test_utils.h"
 
 static imu_data_t make_imu(bool valid) {

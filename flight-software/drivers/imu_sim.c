@@ -1,5 +1,5 @@
 #include "imu_sim.h"
-#include "config.h"
+#include "common/config.h"
 #include <math.h>
 
 static float t = 0.0f;

@@ -1,5 +1,5 @@
-#include "command.h"
-#include "types.h"
+#include "comms/command.h"
+#include "common/types.h"
 #include "test_utils.h"
 
 void test_command_parse_status(void) {

@@ -1,6 +1,6 @@
 #include "logger.h"
-#include "uart_port.h"
-#include "time_port.h"
+#include "bsp/uart_port.h"
+#include "bsp/time_port.h"
 
 #include <stdio.h>
 #include <stdint.h>

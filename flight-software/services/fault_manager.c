@@ -1,5 +1,5 @@
 #include "fault_manager.h"
-#include "state_machine.h"
+#include "app/state_machine.h"
 #include "health_monitor.h"
 #include "logger.h"
 

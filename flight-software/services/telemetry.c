@@ -1,6 +1,6 @@
 #include "telemetry.h"
-#include "state_machine.h"
-#include "uart_port.h"
+#include "app/state_machine.h"
+#include "bsp/uart_port.h"
 #include "health_monitor.h"
 
 #include <stdio.h>

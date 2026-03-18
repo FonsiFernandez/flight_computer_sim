@@ -1,15 +1,16 @@
-#include "time_port.h"
-#include "imu_sim.h"
-#include "altimeter_sim.h"
-#include "state_machine.h"
-#include "config.h"
-#include "health_monitor.h"
-#include "logger.h"
-#include "telemetry.h"
-#include "fault_manager.h"
-#include "command.h"
+#include "bsp/time_port.h"
+#include "drivers/imu_sim.h"
+#include "drivers/altimeter_sim.h"
+#include "app/state_machine.h"
+#include "common/config.h"
+#include "services/health_monitor.h"
+#include "services/logger.h"
+#include "services/telemetry.h"
+#include "services/fault_manager.h"
+#include "comms/command.h"
 
 #include <stdint.h>
+#include <stdio.h>
 
 static void process_command(command_t cmd) {
     if (!cmd.valid) {
@@ -52,6 +53,7 @@ static void process_command(command_t cmd) {
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
     logger_init();
     logger_info("Flight Computer Sim START");
 
