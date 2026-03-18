@@ -29,3 +29,28 @@ add_executable(flight_computer_sim
 )
 
 target_link_libraries(flight_computer_sim m)
+
+enable_testing()
+
+add_executable(flight_computer_tests
+        tests/test_main.c
+        tests/test_state_machine.c
+        tests/test_health_monitor.c
+        tests/test_fault_manager.c
+        tests/test_command.c
+        tests/logger_stub.c
+        app/state_machine.c
+        services/health_monitor.c
+        services/fault_manager.c
+        comms/command.c
+)
+
+target_include_directories(flight_computer_tests PRIVATE
+        .
+        common
+        app
+        services
+        comms
+)
+
+add_test(NAME flight_computer_tests COMMAND flight_computer_tests)

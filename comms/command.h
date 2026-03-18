@@ -5,5 +5,6 @@
 
 void command_init(void);
 command_t command_poll(void);
+command_t command_parse(const char *line);
 
 #endif
