@@ -4,7 +4,9 @@
 #include <stdio.h>
 
 #ifdef _WIN32
-#include <conio.h>
+#include <windows.h>
+#include <io.h>
+#define STDIN_BUFFER_SIZE 128
 #endif
 
 void command_init(void) {
@@ -47,11 +49,21 @@ command_t command_poll(void) {
     command_t none = { COMMAND_NONE, true };
 
 #ifdef _WIN32
-    if (!_kbhit()) {
+    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    if (hStdin == INVALID_HANDLE_VALUE || hStdin == NULL) {
         return none;
     }
 
-    char buffer[128];
+    DWORD available = 0;
+    if (!PeekNamedPipe(hStdin, NULL, 0, NULL, &available, NULL)) {
+        return none;
+    }
+
+    if (available == 0) {
+        return none;
+    }
+
+    char buffer[STDIN_BUFFER_SIZE];
     if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
         return none;
     }
@@ -64,6 +76,17 @@ command_t command_poll(void) {
 
     return command_parse(buffer);
 #else
-    return none;
+    char buffer[128];
+    if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
+        return none;
+    }
+
+    size_t len = strlen(buffer);
+    while (len > 0 && (buffer[len - 1] == '\n' || buffer[len - 1] == '\r')) {
+        buffer[len - 1] = '\0';
+        len--;
+    }
+
+    return command_parse(buffer);
 #endif
 }
