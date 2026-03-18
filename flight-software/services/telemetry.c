@@ -1,21 +1,58 @@
-#include "telemetry.h"
-#include "app/state_machine.h"
+#include "services/telemetry.h"
+#include "services/health_monitor.h"
 #include "bsp/uart_port.h"
-#include "health_monitor.h"
 
 #include <stdio.h>
 
 void telemetry_send(uint64_t elapsed_ms, system_mode_t mode, imu_data_t imu, altimeter_data_t alt) {
-    char buffer[512];
+    char buffer[1024];
     const health_monitor_data_t* hm = health_monitor_get_data();
 
+    const char* mode_str = "UNKNOWN";
+    switch (mode) {
+        case MODE_INIT:
+            mode_str = "INIT";
+            break;
+        case MODE_NOMINAL:
+            mode_str = "NOMINAL";
+            break;
+        case MODE_DEGRADED:
+            mode_str = "DEGRADED";
+            break;
+        case MODE_SAFE:
+            mode_str = "SAFE";
+            break;
+        default:
+            break;
+    }
+
     snprintf(buffer, sizeof(buffer),
-             "TIME=%llu ms | MODE=%s | "
-             "IMU[x=%.2f y=%.2f z=%.2f valid=%d] | "
-             "ALT[%.2f m valid=%d] | "
-             "HM[imu_fault=%d imu_rec=%d alt_fault=%d alt_rec=%d imu_lat=%d alt_lat=%d status=%d]",
+             "{"
+             "\"type\":\"telemetry\","
+             "\"time_ms\":%llu,"
+             "\"mode\":\"%s\","
+             "\"imu\":{"
+                 "\"x\":%.2f,"
+                 "\"y\":%.2f,"
+                 "\"z\":%.2f,"
+                 "\"valid\":%d"
+             "},"
+             "\"altimeter\":{"
+                 "\"altitude_m\":%.2f,"
+                 "\"valid\":%d"
+             "},"
+             "\"health\":{"
+                 "\"imu_fault_count\":%d,"
+                 "\"imu_recovery_count\":%d,"
+                 "\"alt_fault_count\":%d,"
+                 "\"alt_recovery_count\":%d,"
+                 "\"imu_latched\":%d,"
+                 "\"alt_latched\":%d,"
+                 "\"status\":%d"
+             "}"
+             "}",
              (unsigned long long)elapsed_ms,
-             state_machine_get_mode_string(mode),
+             mode_str,
              imu.accel_x,
              imu.accel_y,
              imu.accel_z,
