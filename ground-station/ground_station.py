@@ -1,36 +1,34 @@
-import subprocess
-import sys
-from tkinter import Tk, filedialog
-import re
-import threading
-import queue
 import csv
 import json
+import re
+import subprocess
+import sys
+import threading
+import queue
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 from collections import deque
-from dataclasses import dataclass
 
-import matplotlib
-matplotlib.use("TkAgg")
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QTextEdit, QLabel, QFileDialog, QLineEdit, QGroupBox,
+    QMessageBox, QFrame
+)
 
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from matplotlib.widgets import Button, TextBox
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 
 
 EXECUTABLE_PATH = r"C:\Users\Alfonso.Fernandez\CLionProjects\flight-computer-sim\flight-software\cmake-build-debug\flight_computer_sim.exe"
-
-REPLAY_MODE = False
-REPLAY_CSV_PATH = r"logs\telemetry_YYYYMMDD_HHMMSS.csv"
 REPLAY_STEP_FRAMES = 1
+MAX_POINTS = 300
+MAX_EVENTS = 100
 
 LOG_LINE_PATTERN = re.compile(
     r"\[(?P<level>INFO|WARN|ERROR)\]\[T\+(?P<time>\d+)\s+ms\]\s+(?P<message>.+)"
 )
-
-MAX_POINTS = 300
-MAX_EVENTS = 14
 
 
 @dataclass
@@ -57,109 +55,129 @@ class TelemetryFrame:
     health_status: int
 
 
-class GroundStation:
-    def __init__(self, executable_path: str):
-        self.executable_path = executable_path
+class PlotWidget(FigureCanvas):
+    def __init__(self):
+        self.figure = Figure(facecolor="#0b0f14")
+        super().__init__(self.figure)
+        self.ax = self.figure.add_subplot(111)
+        self.ax2 = None
+        self._setup_dark_axes()
+
+    def _setup_dark_axes(self):
+        self.ax.set_facecolor("#10161d")
+        self.ax.tick_params(colors="#9fb3c8")
+        for spine in self.ax.spines.values():
+            spine.set_color("#3a4654")
+        self.ax.title.set_color("#f5f8fb")
+        self.ax.xaxis.label.set_color("#d9e2ec")
+        self.ax.yaxis.label.set_color("#d9e2ec")
+        self.ax.grid(True, color="#2c3846", alpha=0.35)
+
+    def clear(self, with_secondary=False):
+        self.figure.clear()
+        self.ax = self.figure.add_subplot(111)
+        self._setup_dark_axes()
+        self.ax2 = self.ax.twinx() if with_secondary else None
+        if self.ax2 is not None:
+            self.ax2.tick_params(colors="#9fb3c8")
+            for spine in self.ax2.spines.values():
+                spine.set_color("#3a4654")
+            self.ax2.yaxis.label.set_color("#d9e2ec")
+
+    def draw_idle_safe(self):
+        self.figure.tight_layout()
+        self.draw_idle()
+
+
+class StatusTile(QFrame):
+    def __init__(self, title: str):
+        super().__init__()
+        self.setObjectName("StatusTile")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("TileTitle")
+        self.value_label = QLabel("--")
+        self.value_label.setObjectName("TileValue")
+
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.value_label)
+
+    def set_value(self, text: str):
+        self.value_label.setText(text)
+
+    def set_color(self, color: str):
+        self.setStyleSheet(f"""
+            QFrame#StatusTile {{
+                background-color: #10161d;
+                border: 1px solid {color};
+                border-radius: 10px;
+            }}
+            QLabel#TileTitle {{
+                color: #9fb3c8;
+                font-size: 11px;
+                font-weight: 600;
+            }}
+            QLabel#TileValue {{
+                color: {color};
+                font-size: 18px;
+                font-weight: 700;
+            }}
+        """)
+
+
+class GroundStationWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("Flight Computer Ground Station")
+        self.resize(1700, 980)
+
         self.process = None
-        self.anim = None
         self.output_queue = queue.Queue()
-
         self.reader_thread = None
-        self.running = False
-        self.paused = False
-        self.stopped = False
+        self.running_reader = False
 
-        self.replay_mode = REPLAY_MODE
-        self.replay_csv_path = REPLAY_CSV_PATH
+        self.live_mode = False
+        self.replay_mode = False
+        self.replay_csv_path = None
         self.replay_frames = []
         self.replay_index = 0
 
-        self.times = deque(maxlen=MAX_POINTS)
-
-        self.altitudes = deque(maxlen=MAX_POINTS)
-        self.truth_altitudes = deque(maxlen=MAX_POINTS)
-
-        self.accel_x = deque(maxlen=MAX_POINTS)
-        self.accel_y = deque(maxlen=MAX_POINTS)
-        self.accel_z = deque(maxlen=MAX_POINTS)
-        self.truth_accel_z = deque(maxlen=MAX_POINTS)
-
-        self.truth_velocity_z = deque(maxlen=MAX_POINTS)
-
-        self.altitude_error = deque(maxlen=MAX_POINTS)
-        self.accel_z_error = deque(maxlen=MAX_POINTS)
-
-        self.latest_frame = None
-        self.latest_mode = "UNKNOWN"
+        self.paused = False
+        self.stopped = False
 
         self.csv_file = None
         self.csv_writer = None
         self.csv_path = None
 
-        self.event_lines = deque(maxlen=MAX_EVENTS)
+        self.times = deque(maxlen=MAX_POINTS)
+        self.altitudes = deque(maxlen=MAX_POINTS)
+        self.truth_altitudes = deque(maxlen=MAX_POINTS)
+        self.accel_x = deque(maxlen=MAX_POINTS)
+        self.accel_y = deque(maxlen=MAX_POINTS)
+        self.accel_z = deque(maxlen=MAX_POINTS)
+        self.truth_accel_z = deque(maxlen=MAX_POINTS)
+        self.altitude_error = deque(maxlen=MAX_POINTS)
+        self.accel_z_error = deque(maxlen=MAX_POINTS)
+
+        self.latest_frame = None
+        self.latest_mode = "UNKNOWN"
         self.mode_transitions = []
         self.last_transition_mode = None
+        self.event_lines = deque(maxlen=MAX_EVENTS)
 
-        self.fig = None
-        self.ax_alt = None
-        self.ax_alt_err = None
-        self.ax_az = None
-        self.ax_az_err = None
-        self.ax_xy = None
-        self.ax_status = None
-        self.ax_events = None
+        self._build_ui()
+        self._apply_styles()
 
-        self.btn_reset_warn = None
-        self.btn_reset_all = None
-        self.btn_nominal = None
-        self.btn_safe = None
-        self.btn_status = None
-        self.btn_help = None
-        self.btn_pause = None
-        self.btn_resume = None
-        self.btn_restart = None
-        self.btn_stop = None
-        self.btn_open_replay = None
-        self.command_box = None
-        self.btn_send = None
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_dashboard)
+        self.timer.start(200)
 
-    # ---------- Styling ----------
-
-    def apply_theme(self):
-        plt.rcParams.update({
-            "figure.facecolor": "#0b0f14",
-            "axes.facecolor": "#10161d",
-            "axes.edgecolor": "#3a4654",
-            "axes.labelcolor": "#d9e2ec",
-            "xtick.color": "#9fb3c8",
-            "ytick.color": "#9fb3c8",
-            "text.color": "#e5edf5",
-            "axes.titlecolor": "#f4f7fb",
-            "grid.color": "#2c3846",
-            "legend.facecolor": "#10161d",
-            "legend.edgecolor": "#3a4654",
-            "font.size": 10,
-        })
-
-    @staticmethod
-    def mode_color(mode: str):
-        if mode == "NOMINAL":
-            return "#0f1c14"
-        if mode == "DEGRADED":
-            return "#211a0d"
-        if mode == "SAFE":
-            return "#231012"
-        return "#10161d"
-
-    @staticmethod
-    def mode_line_color(mode: str):
-        if mode == "NOMINAL":
-            return "#33d17a"
-        if mode == "DEGRADED":
-            return "#ffb347"
-        if mode == "SAFE":
-            return "#ff5c5c"
-        return "#7f8c9a"
+    # ---------- helpers ----------
 
     @staticmethod
     def health_status_text(status: int):
@@ -171,138 +189,189 @@ class GroundStation:
             return "CRITICAL"
         return "UNKNOWN"
 
-    # ---------- Replay ----------
+    @staticmethod
+    def mode_color(mode: str):
+        if mode == "NOMINAL":
+            return "#33d17a"
+        if mode == "DEGRADED":
+            return "#ffb347"
+        if mode == "SAFE":
+            return "#ff5c5c"
+        return "#7f8c9a"
 
-    def load_replay_csv(self):
-        csv_path = Path(self.replay_csv_path)
+    @staticmethod
+    def health_color(status: int):
+        if status == 0:
+            return "#33d17a"
+        if status == 1:
+            return "#ffb347"
+        if status == 2:
+            return "#ff5c5c"
+        return "#7f8c9a"
 
-        if not csv_path.exists():
-            print(f"Replay CSV not found: {csv_path}")
-            sys.exit(1)
+    @staticmethod
+    def execution_color(text: str):
+        if text == "RUNNING":
+            return "#33d17a"
+        if text == "PAUSED":
+            return "#ffb347"
+        if text == "STOPPED":
+            return "#ff5c5c"
+        return "#7f8c9a"
 
-        self.replay_frames.clear()
+    # ---------- UI ----------
 
-        with open(csv_path, "r", newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
 
-            for row in reader:
-                frame = TelemetryFrame(
-                    time_ms=int(row["time_ms"]),
-                    mode=row["mode"],
-                    mission_phase=row.get("mission_phase", "UNKNOWN"),
-                    truth_time_s=float(row.get("truth_time_s", 0.0)),
-                    truth_altitude_m=float(row.get("truth_altitude_m", 0.0)),
-                    truth_velocity_z_mps=float(row.get("truth_velocity_z_mps", 0.0)),
-                    truth_acceleration_z_mps2=float(row.get("truth_acceleration_z_mps2", 0.0)),
-                    ax=float(row["ax"]),
-                    ay=float(row["ay"]),
-                    az=float(row["az"]),
-                    imu_valid=int(row["imu_valid"]),
-                    altitude_m=float(row["altitude_m"]),
-                    alt_valid=int(row["alt_valid"]),
-                    imu_fault_count=int(row["imu_fault_count"]),
-                    imu_recovery_count=int(row["imu_recovery_count"]),
-                    alt_fault_count=int(row["alt_fault_count"]),
-                    alt_recovery_count=int(row["alt_recovery_count"]),
-                    imu_latched=int(row["imu_latched"]),
-                    alt_latched=int(row["alt_latched"]),
-                    health_status=int(row["health_status"]),
-                )
-                self.replay_frames.append(frame)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
 
-        self.replay_index = 0
-        print(f"Loaded {len(self.replay_frames)} replay frames from {csv_path}")
+        # Top controls
+        controls = QHBoxLayout()
 
-    def consume_replay_frames(self):
-        if self.stopped or self.paused:
-            return
+        self.btn_start_live = QPushButton("Start Live")
+        self.btn_open_replay = QPushButton("Open Replay")
+        self.btn_pause = QPushButton("Pause")
+        self.btn_resume = QPushButton("Resume")
+        self.btn_restart = QPushButton("Restart Replay")
+        self.btn_stop = QPushButton("Stop")
 
-        if self.replay_index >= len(self.replay_frames):
-            return
+        self.btn_reset_warn = QPushButton("Reset Warn")
+        self.btn_reset_all = QPushButton("Reset All")
+        self.btn_force_nom = QPushButton("Force Nominal")
+        self.btn_force_safe = QPushButton("Force Safe")
+        self.btn_status = QPushButton("Status")
+        self.btn_help = QPushButton("Help")
 
-        for _ in range(REPLAY_STEP_FRAMES):
-            if self.replay_index >= len(self.replay_frames):
-                break
+        self.command_input = QLineEdit()
+        self.command_input.setPlaceholderText("Type manual command...")
+        self.btn_send = QPushButton("Send")
 
-            telemetry = self.replay_frames[self.replay_index]
-            self.replay_index += 1
-            self.push_telemetry_frame(telemetry)
+        for w in [
+            self.btn_start_live, self.btn_open_replay, self.btn_pause, self.btn_resume,
+            self.btn_restart, self.btn_stop, self.btn_reset_warn, self.btn_reset_all,
+            self.btn_force_nom, self.btn_force_safe, self.btn_status, self.btn_help
+        ]:
+            controls.addWidget(w)
 
-    def restart_replay(self):
-        if not self.replay_mode:
-            self.record_event("OPERATOR  | restart ignored (not in replay mode)")
-            return
+        controls.addWidget(self.command_input, 1)
+        controls.addWidget(self.btn_send)
+        root.addLayout(controls)
 
-        self.replay_index = 0
-        self.paused = False
-        self.stopped = False
-        self.reset_buffers()
-        self.record_event(f"REPLAY    | restarted: {self.replay_csv_path}")
+        # Tiles
+        tiles_layout = QHBoxLayout()
+        self.tile_mode = StatusTile("MODE")
+        self.tile_phase = StatusTile("PHASE")
+        self.tile_health = StatusTile("HEALTH")
+        self.tile_execution = StatusTile("EXECUTION")
 
-    def open_replay_file(self):
-        root = Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
+        tiles_layout.addWidget(self.tile_mode)
+        tiles_layout.addWidget(self.tile_phase)
+        tiles_layout.addWidget(self.tile_health)
+        tiles_layout.addWidget(self.tile_execution)
+        root.addLayout(tiles_layout)
 
-        selected_file = filedialog.askopenfilename(
-            title="Select replay CSV",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
-        )
+        # Main grid
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        root.addLayout(grid, 1)
 
-        root.destroy()
+        self.alt_plot = PlotWidget()
+        self.accel_plot = PlotWidget()
+        self.xy_plot = PlotWidget()
 
-        if not selected_file:
-            self.record_event("REPLAY    | file selection cancelled")
-            return
+        self.status_text = QTextEdit()
+        self.status_text.setReadOnly(True)
 
-        if self.process and self.process.poll() is None:
-            try:
-                self.process.terminate()
-            except Exception:
-                pass
+        self.events_text = QTextEdit()
+        self.events_text.setReadOnly(True)
 
-        self.replay_mode = True
-        self.replay_csv_path = selected_file
-        self.running = False
-        self.load_replay_csv()
-        self.replay_index = 0
-        self.paused = False
-        self.stopped = False
-        self.reset_buffers()
-        self.record_event(f"REPLAY    | loaded file: {self.replay_csv_path}")
+        grid.addWidget(self._wrap_group("Altitude / Truth vs Measured", self.alt_plot), 0, 0)
+        grid.addWidget(self._wrap_group("Accel Z / Truth vs Measured", self.accel_plot), 0, 1)
+        grid.addWidget(self._wrap_group("Accel X / Y", self.xy_plot), 1, 0)
+        grid.addWidget(self._wrap_group("System Status", self.status_text), 1, 1)
+        grid.addWidget(self._wrap_group("Event Log", self.events_text), 0, 2, 2, 1)
 
-    # ---------- Live simulator ----------
+        self.footer_label = QLabel("Source: n/a | Mode: IDLE")
+        root.addWidget(self.footer_label)
 
-    def start_simulator(self):
-        try:
-            self.process = subprocess.Popen(
-                [self.executable_path],
-                stdout=subprocess.PIPE,
-                stdin=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-        except FileNotFoundError:
-            print(f"Executable not found: {self.executable_path}")
-            sys.exit(1)
+        # Signals
+        self.btn_start_live.clicked.connect(self.start_live)
+        self.btn_open_replay.clicked.connect(self.open_replay_file)
+        self.btn_pause.clicked.connect(self.pause)
+        self.btn_resume.clicked.connect(self.resume)
+        self.btn_restart.clicked.connect(self.restart_replay)
+        self.btn_stop.clicked.connect(self.stop_execution)
 
-    def start_reader_thread(self):
-        self.running = True
-        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
-        self.reader_thread.start()
+        self.btn_reset_warn.clicked.connect(lambda: self.send_command("reset_warnings"))
+        self.btn_reset_all.clicked.connect(lambda: self.send_command("reset_all"))
+        self.btn_force_nom.clicked.connect(lambda: self.send_command("force_nominal"))
+        self.btn_force_safe.clicked.connect(lambda: self.send_command("force_safe"))
+        self.btn_status.clicked.connect(lambda: self.send_command("status"))
+        self.btn_help.clicked.connect(lambda: self.send_command("help"))
 
-    def _reader_loop(self):
-        if self.process is None or self.process.stdout is None:
-            return
+        self.btn_send.clicked.connect(self.send_manual_command)
+        self.command_input.returnPressed.connect(self.send_manual_command)
 
-        while self.running:
-            line = self.process.stdout.readline()
-            if not line:
-                break
-            self.output_queue.put(line.strip())
+    def _wrap_group(self, title, widget):
+        box = QGroupBox(title)
+        layout = QVBoxLayout(box)
+        layout.addWidget(widget)
+        return box
 
-    # ---------- Parsing ----------
+    def _apply_styles(self):
+        self.setStyleSheet("""
+            QMainWindow, QWidget {
+                background-color: #0b0f14;
+                color: #e6eef7;
+                font-family: Segoe UI, Arial, sans-serif;
+                font-size: 12px;
+            }
+            QGroupBox {
+                border: 1px solid #2a3440;
+                border-radius: 10px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background-color: #10161d;
+                font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px 0 6px;
+                color: #f5f8fb;
+            }
+            QPushButton {
+                background-color: #17212b;
+                border: 1px solid #2e3c4b;
+                border-radius: 7px;
+                padding: 8px 10px;
+                color: #e6eef7;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #223041;
+            }
+            QPushButton:pressed {
+                background-color: #2c4157;
+            }
+            QTextEdit, QLineEdit {
+                background-color: #0f141a;
+                border: 1px solid #2e3c4b;
+                border-radius: 7px;
+                color: #e6eef7;
+                padding: 6px;
+                font-family: Consolas, Courier New, monospace;
+            }
+            QLabel {
+                color: #cfd9e3;
+            }
+        """)
+
+    # ---------- parsing ----------
 
     def parse_telemetry(self, line: str):
         try:
@@ -345,31 +414,13 @@ class GroundStation:
         match = LOG_LINE_PATTERN.search(line)
         if not match:
             return None
-
         return {
             "level": match.group("level"),
             "time_ms": int(match.group("time")),
             "message": match.group("message"),
         }
 
-    # ---------- State / buffers ----------
-
-    def reset_buffers(self):
-        self.times.clear()
-        self.altitudes.clear()
-        self.truth_altitudes.clear()
-        self.accel_x.clear()
-        self.accel_y.clear()
-        self.accel_z.clear()
-        self.truth_accel_z.clear()
-        self.truth_velocity_z.clear()
-        self.altitude_error.clear()
-        self.accel_z_error.clear()
-        self.latest_frame = None
-        self.latest_mode = "UNKNOWN"
-        self.mode_transitions.clear()
-        self.last_transition_mode = None
-        self.event_lines.clear()
+    # ---------- state/buffers ----------
 
     def record_event(self, text: str):
         self.event_lines.appendleft(text)
@@ -383,46 +434,36 @@ class GroundStation:
 
     def push_telemetry_frame(self, telemetry: TelemetryFrame):
         time_s = telemetry.time_ms / 1000.0
-
         self.times.append(time_s)
         self.altitudes.append(telemetry.altitude_m)
         self.truth_altitudes.append(telemetry.truth_altitude_m)
-
         self.accel_x.append(telemetry.ax)
         self.accel_y.append(telemetry.ay)
         self.accel_z.append(telemetry.az)
         self.truth_accel_z.append(telemetry.truth_acceleration_z_mps2)
-
-        self.truth_velocity_z.append(telemetry.truth_velocity_z_mps)
         self.altitude_error.append(telemetry.altitude_m - telemetry.truth_altitude_m)
         self.accel_z_error.append(telemetry.az - telemetry.truth_acceleration_z_mps2)
-
         self.latest_frame = telemetry
         self.latest_mode = telemetry.mode
-
         self.record_mode_transition_if_needed(telemetry)
 
-    def consume_available_output(self):
-        if self.stopped or self.paused:
-            return
+    def reset_buffers(self):
+        self.times.clear()
+        self.altitudes.clear()
+        self.truth_altitudes.clear()
+        self.accel_x.clear()
+        self.accel_y.clear()
+        self.accel_z.clear()
+        self.truth_accel_z.clear()
+        self.altitude_error.clear()
+        self.accel_z_error.clear()
+        self.latest_frame = None
+        self.latest_mode = "UNKNOWN"
+        self.mode_transitions.clear()
+        self.last_transition_mode = None
+        self.event_lines.clear()
 
-        while not self.output_queue.empty():
-            line = self.output_queue.get()
-            print(f"[SIM] {line}")
-
-            log_data = self.parse_log_line(line)
-            if log_data is not None:
-                event_text = f"T+{log_data['time_ms'] / 1000.0:6.1f}s | {log_data['level']:5s} | {log_data['message']}"
-                self.record_event(event_text)
-
-            telemetry = self.parse_telemetry(line)
-            if telemetry is None:
-                continue
-
-            self.push_telemetry_frame(telemetry)
-            self.log_frame_to_csv(telemetry)
-
-    # ---------- CSV ----------
+    # ---------- CSV live logging ----------
 
     def start_csv_logging(self):
         logs_dir = Path("logs")
@@ -433,7 +474,6 @@ class GroundStation:
 
         self.csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
         self.csv_writer = csv.writer(self.csv_file)
-
         self.csv_writer.writerow([
             "time_ms",
             "mode",
@@ -483,7 +523,6 @@ class GroundStation:
             frame.alt_latched,
             frame.health_status,
         ])
-
         self.csv_file.flush()
 
     def stop_csv_logging(self):
@@ -492,46 +531,155 @@ class GroundStation:
             self.csv_file = None
             self.csv_writer = None
 
-    # ---------- Commands / controls ----------
+    # ---------- live ----------
 
-    def send_command(self, cmd: str):
-        if self.stopped:
-            self.record_event(f"OPERATOR  | command ignored after stop: {cmd}")
-            return
+    def start_live(self):
+        self.stop_process_if_running()
+        self.reset_buffers()
 
-        if self.replay_mode:
-            self.record_event(f"REPLAY    | command ignored in replay mode: {cmd}")
-            return
-
-        if self.process is None or self.process.stdin is None:
-            return
-
-        cmd = cmd.strip()
-        if not cmd:
-            return
+        self.live_mode = True
+        self.replay_mode = False
+        self.paused = False
+        self.stopped = False
 
         try:
-            self.process.stdin.write(cmd + "\n")
-            self.process.stdin.flush()
-            self.record_event(f"OPERATOR  | sent command: {cmd}")
-            print(f"[GS] Sent command: {cmd}")
-        except BrokenPipeError:
-            self.record_event("OPERATOR  | failed to send command: stdin closed")
-            print("[GS] Cannot send command: simulator stdin is closed")
-
-    def on_send_command(self, _event):
-        if self.command_box is None:
+            self.process = subprocess.Popen(
+                [EXECUTABLE_PATH],
+                stdout=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+        except FileNotFoundError:
+            QMessageBox.critical(self, "Error", f"Executable not found:\n{EXECUTABLE_PATH}")
             return
-        cmd = self.command_box.text.strip()
-        if cmd:
-            self.send_command(cmd)
-            self.command_box.set_val("")
 
-    def on_submit_command(self, text):
-        cmd = text.strip()
-        if cmd:
-            self.send_command(cmd)
-            self.command_box.set_val("")
+        self.start_csv_logging()
+        self.running_reader = True
+        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self.reader_thread.start()
+
+        self.record_event("LIVE      | simulator started")
+
+    def _reader_loop(self):
+        if self.process is None or self.process.stdout is None:
+            return
+
+        while self.running_reader:
+            line = self.process.stdout.readline()
+            if not line:
+                break
+            self.output_queue.put(line.strip())
+
+    def consume_live_output(self):
+        if self.stopped or self.paused:
+            return
+
+        while not self.output_queue.empty():
+            line = self.output_queue.get()
+
+            log_data = self.parse_log_line(line)
+            if log_data is not None:
+                event_text = f"T+{log_data['time_ms'] / 1000.0:6.1f}s | {log_data['level']:5s} | {log_data['message']}"
+                self.record_event(event_text)
+
+            telemetry = self.parse_telemetry(line)
+            if telemetry is None:
+                continue
+
+            self.push_telemetry_frame(telemetry)
+            self.log_frame_to_csv(telemetry)
+
+    def stop_process_if_running(self):
+        self.running_reader = False
+        if self.process and self.process.poll() is None:
+            try:
+                self.process.terminate()
+            except Exception:
+                pass
+        self.process = None
+        self.stop_csv_logging()
+
+    # ---------- replay ----------
+
+    def open_replay_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select replay CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+
+        if not file_path:
+            self.record_event("REPLAY    | file selection cancelled")
+            return
+
+        self.stop_process_if_running()
+        self.reset_buffers()
+
+        self.live_mode = False
+        self.replay_mode = True
+        self.replay_csv_path = file_path
+        self.replay_frames.clear()
+        self.replay_index = 0
+        self.paused = False
+        self.stopped = False
+
+        with open(file_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                self.replay_frames.append(
+                    TelemetryFrame(
+                        time_ms=int(row["time_ms"]),
+                        mode=row["mode"],
+                        mission_phase=row.get("mission_phase", "UNKNOWN"),
+                        truth_time_s=float(row.get("truth_time_s", 0.0)),
+                        truth_altitude_m=float(row.get("truth_altitude_m", 0.0)),
+                        truth_velocity_z_mps=float(row.get("truth_velocity_z_mps", 0.0)),
+                        truth_acceleration_z_mps2=float(row.get("truth_acceleration_z_mps2", 0.0)),
+                        ax=float(row["ax"]),
+                        ay=float(row["ay"]),
+                        az=float(row["az"]),
+                        imu_valid=int(row["imu_valid"]),
+                        altitude_m=float(row["altitude_m"]),
+                        alt_valid=int(row["alt_valid"]),
+                        imu_fault_count=int(row["imu_fault_count"]),
+                        imu_recovery_count=int(row["imu_recovery_count"]),
+                        alt_fault_count=int(row["alt_fault_count"]),
+                        alt_recovery_count=int(row["alt_recovery_count"]),
+                        imu_latched=int(row["imu_latched"]),
+                        alt_latched=int(row["alt_latched"]),
+                        health_status=int(row["health_status"]),
+                    )
+                )
+
+        self.record_event(f"REPLAY    | loaded file: {file_path}")
+
+    def consume_replay_frames(self):
+        if self.stopped or self.paused:
+            return
+        if self.replay_index >= len(self.replay_frames):
+            return
+
+        for _ in range(REPLAY_STEP_FRAMES):
+            if self.replay_index >= len(self.replay_frames):
+                break
+            telemetry = self.replay_frames[self.replay_index]
+            self.replay_index += 1
+            self.push_telemetry_frame(telemetry)
+
+    def restart_replay(self):
+        if not self.replay_mode:
+            self.record_event("OPERATOR  | restart ignored (not in replay mode)")
+            return
+        self.replay_index = 0
+        self.paused = False
+        self.stopped = False
+        self.reset_buffers()
+        self.record_event("REPLAY    | restarted")
+
+    # ---------- controls ----------
 
     def pause(self):
         self.paused = True
@@ -548,264 +696,178 @@ class GroundStation:
         self.stopped = True
         self.paused = True
         self.record_event("OPERATOR  | stopped acquisition/simulation")
+        if self.live_mode:
+            self.stop_process_if_running()
 
-        if not self.replay_mode and self.process and self.process.poll() is None:
-            try:
-                self.process.terminate()
-            except Exception:
-                pass
+    def send_command(self, cmd: str):
+        cmd = cmd.strip()
+        if not cmd:
+            return
 
-    # ---------- UI ----------
-
-    def setup_buttons(self):
-        button_face = "#17212b"
-        button_hover = "#223041"
-
-        ax_btn_reset_warn = self.fig.add_axes([0.03, 0.02, 0.09, 0.045])
-        ax_btn_reset_all = self.fig.add_axes([0.13, 0.02, 0.09, 0.045])
-        ax_btn_nominal = self.fig.add_axes([0.23, 0.02, 0.09, 0.045])
-        ax_btn_safe = self.fig.add_axes([0.33, 0.02, 0.09, 0.045])
-        ax_btn_status = self.fig.add_axes([0.43, 0.02, 0.07, 0.045])
-        ax_btn_help = self.fig.add_axes([0.51, 0.02, 0.06, 0.045])
-
-        ax_btn_pause = self.fig.add_axes([0.58, 0.02, 0.07, 0.045])
-        ax_btn_resume = self.fig.add_axes([0.66, 0.02, 0.07, 0.045])
-        ax_btn_restart = self.fig.add_axes([0.74, 0.02, 0.07, 0.045])
-        ax_btn_stop = self.fig.add_axes([0.82, 0.02, 0.06, 0.045])
-        ax_btn_open = self.fig.add_axes([0.89, 0.02, 0.08, 0.045])
-
-        ax_textbox = self.fig.add_axes([0.58, 0.075, 0.28, 0.04])
-        ax_btn_send = self.fig.add_axes([0.87, 0.075, 0.10, 0.04])
-
-        for ax in [ax_btn_reset_warn, ax_btn_reset_all, ax_btn_nominal, ax_btn_safe,
-                   ax_btn_status, ax_btn_help, ax_btn_pause, ax_btn_resume,
-                   ax_btn_restart, ax_btn_stop, ax_btn_open, ax_textbox, ax_btn_send]:
-            ax.set_facecolor(button_face)
-
-        self.btn_reset_warn = Button(ax_btn_reset_warn, "Reset Warn", color=button_face, hovercolor=button_hover)
-        self.btn_reset_all = Button(ax_btn_reset_all, "Reset All", color=button_face, hovercolor=button_hover)
-        self.btn_nominal = Button(ax_btn_nominal, "Force Nom", color=button_face, hovercolor=button_hover)
-        self.btn_safe = Button(ax_btn_safe, "Force Safe", color=button_face, hovercolor=button_hover)
-        self.btn_status = Button(ax_btn_status, "Status", color=button_face, hovercolor=button_hover)
-        self.btn_help = Button(ax_btn_help, "Help", color=button_face, hovercolor=button_hover)
-
-        self.btn_pause = Button(ax_btn_pause, "Pause", color=button_face, hovercolor=button_hover)
-        self.btn_resume = Button(ax_btn_resume, "Resume", color=button_face, hovercolor=button_hover)
-        self.btn_restart = Button(ax_btn_restart, "Restart", color=button_face, hovercolor=button_hover)
-        self.btn_stop = Button(ax_btn_stop, "Stop", color=button_face, hovercolor=button_hover)
-        self.btn_open_replay = Button(ax_btn_open, "Open CSV", color=button_face, hovercolor=button_hover)
-
-        self.command_box = TextBox(ax_textbox, "", initial="")
-        self.btn_send = Button(ax_btn_send, "Send", color=button_face, hovercolor=button_hover)
-
-        for btn in [
-            self.btn_reset_warn, self.btn_reset_all, self.btn_nominal, self.btn_safe,
-            self.btn_status, self.btn_help, self.btn_pause, self.btn_resume,
-            self.btn_restart, self.btn_stop, self.btn_open_replay, self.btn_send
-        ]:
-            btn.label.set_color("#e6eef7")
-            btn.label.set_fontsize(9)
-
-        self.btn_reset_warn.on_clicked(lambda event: self.send_command("reset_warnings"))
-        self.btn_reset_all.on_clicked(lambda event: self.send_command("reset_all"))
-        self.btn_nominal.on_clicked(lambda event: self.send_command("force_nominal"))
-        self.btn_safe.on_clicked(lambda event: self.send_command("force_safe"))
-        self.btn_status.on_clicked(lambda event: self.send_command("status"))
-        self.btn_help.on_clicked(lambda event: self.send_command("help"))
-
-        self.btn_pause.on_clicked(lambda event: self.pause())
-        self.btn_resume.on_clicked(lambda event: self.resume())
-        self.btn_restart.on_clicked(lambda event: self.restart_replay())
-        self.btn_stop.on_clicked(lambda event: self.stop_execution())
-        self.btn_open_replay.on_clicked(lambda event: self.open_replay_file())
-
-        self.btn_send.on_clicked(self.on_send_command)
-        self.command_box.on_submit(self.on_submit_command)
-
-    def draw_mode_transition_lines(self):
-        for t_s, mode in self.mode_transitions:
-            color = self.mode_line_color(mode)
-            self.ax_alt.axvline(t_s, linestyle="--", linewidth=1.0, color=color, alpha=0.65)
-            self.ax_az.axvline(t_s, linestyle="--", linewidth=1.0, color=color, alpha=0.65)
-            self.ax_xy.axvline(t_s, linestyle="--", linewidth=1.0, color=color, alpha=0.65)
-
-    def update_dashboard(self, _frame):
-        if self.replay_mode:
-            self.consume_replay_frames()
-        else:
-            self.consume_available_output()
-
-        self.ax_alt.clear()
-        self.ax_alt_err.clear()
-        self.ax_az.clear()
-        self.ax_az_err.clear()
-        self.ax_xy.clear()
-        self.ax_status.clear()
-        self.ax_events.clear()
-
-        bg_color = self.mode_color(self.latest_mode)
-
-        self.ax_alt.set_facecolor(bg_color)
-        self.ax_az.set_facecolor(bg_color)
-        self.ax_xy.set_facecolor(bg_color)
-        self.ax_status.set_facecolor("#10161d")
-        self.ax_events.set_facecolor("#10161d")
-
-        if len(self.times) > 0:
-            self.ax_alt.plot(self.times, self.altitudes, label="Measured Altitude [m]", linewidth=2.0)
-            self.ax_alt.plot(self.times, self.truth_altitudes, label="Truth Altitude [m]", linewidth=1.8, linestyle="--")
-            self.ax_alt_err.plot(self.times, self.altitude_error, linestyle=":", linewidth=1.4, label="Altitude Error [m]")
-
-            self.ax_az.plot(self.times, self.accel_z, label="Measured Accel Z [m/s²]", linewidth=2.0)
-            self.ax_az.plot(self.times, self.truth_accel_z, label="Truth Accel Z [m/s²]", linewidth=1.8, linestyle="--")
-            self.ax_az_err.plot(self.times, self.accel_z_error, linestyle=":", linewidth=1.4, label="Accel Z Error [m/s²]")
-
-            self.ax_xy.plot(self.times, self.accel_x, label="Measured Accel X [m/s²]", linewidth=1.8)
-            self.ax_xy.plot(self.times, self.accel_y, label="Measured Accel Y [m/s²]", linewidth=1.8)
-
-        self.draw_mode_transition_lines()
-
-        self.ax_alt.set_title(f"ALTITUDE / MODE: {self.latest_mode}")
-        self.ax_alt.set_xlabel("Time [s]")
-        self.ax_alt.set_ylabel("Altitude [m]")
-        self.ax_alt.grid(True, alpha=0.35)
-        alt_lines, alt_labels = self.ax_alt.get_legend_handles_labels()
-        alt_err_lines, alt_err_labels = self.ax_alt_err.get_legend_handles_labels()
-        self.ax_alt.legend(alt_lines + alt_err_lines, alt_labels + alt_err_labels, loc="upper left", fontsize=8)
-        self.ax_alt_err.set_ylabel("Altitude Error [m]")
-        self.ax_alt_err.grid(False)
-
-        self.ax_az.set_title("ACCEL Z / TRUTH VS MEASURED")
-        self.ax_az.set_xlabel("Time [s]")
-        self.ax_az.set_ylabel("Accel Z [m/s²]")
-        self.ax_az.grid(True, alpha=0.35)
-        az_lines, az_labels = self.ax_az.get_legend_handles_labels()
-        az_err_lines, az_err_labels = self.ax_az_err.get_legend_handles_labels()
-        self.ax_az.legend(az_lines + az_err_lines, az_labels + az_err_labels, loc="upper left", fontsize=8)
-        self.ax_az_err.set_ylabel("Accel Z Error [m/s²]")
-        self.ax_az_err.grid(False)
-
-        self.ax_xy.set_title("ACCEL X / Y")
-        self.ax_xy.set_xlabel("Time [s]")
-        self.ax_xy.set_ylabel("Acceleration [m/s²]")
-        self.ax_xy.grid(True, alpha=0.35)
-        self.ax_xy.legend(loc="upper left", fontsize=8)
-
-        self.ax_status.set_title("SYSTEM STATUS")
-        self.ax_status.axis("off")
-
-        if self.latest_frame is not None:
-            lf = self.latest_frame
-            status_text = self.health_status_text(lf.health_status)
-            execution_state = "STOPPED" if self.stopped else ("PAUSED" if self.paused else "RUNNING")
-            csv_label = self.csv_path.name if self.csv_path else "n/a"
-            replay_label = f"{self.replay_index}/{len(self.replay_frames)}" if self.replay_mode else "LIVE"
-            source_label = self.replay_csv_path if self.replay_mode else csv_label
-
-            panel_text = (
-                f"MODE:            {lf.mode}\n"
-                f"EXECUTION:       {execution_state}\n"
-                f"PHASE:           {lf.mission_phase}\n"
-                f"TIME:            {lf.time_ms / 1000.0:.1f} s\n\n"
-                f"TRUTH ALT:       {lf.truth_altitude_m:.2f} m\n"
-                f"TRUTH VEL Z:     {lf.truth_velocity_z_mps:.2f} m/s\n"
-                f"TRUTH ACCEL Z:   {lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
-                f"MEAS ALT:        {lf.altitude_m:.2f} m\n"
-                f"MEAS ACCEL Z:    {lf.az:.2f} m/s²\n"
-                f"ALT ERROR:       {lf.altitude_m - lf.truth_altitude_m:.2f} m\n"
-                f"ACCEL ERROR:     {lf.az - lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
-                f"IMU VALID:       {lf.imu_valid}\n"
-                f"ALT VALID:       {lf.alt_valid}\n"
-                f"HEALTH:          {status_text}\n\n"
-                f"IMU FAULT CNT:   {lf.imu_fault_count}\n"
-                f"IMU REC CNT:     {lf.imu_recovery_count}\n"
-                f"ALT FAULT CNT:   {lf.alt_fault_count}\n"
-                f"ALT REC CNT:     {lf.alt_recovery_count}\n\n"
-                f"IMU LATCHED:     {lf.imu_latched}\n"
-                f"ALT LATCHED:     {lf.alt_latched}\n\n"
-                f"SOURCE:          {source_label}\n"
-                f"CSV:             {csv_label}\n"
-                f"REPLAY FRAME:    {replay_label}"
-            )
-        else:
-            panel_text = "WAITING FOR TELEMETRY..."
-
-        self.ax_status.text(
-            0.03, 0.97, panel_text,
-            transform=self.ax_status.transAxes,
-            va="top",
-            ha="left",
-            fontsize=9.5,
-            family="monospace",
-            color="#e8eef5"
-        )
-
-        self.ax_events.set_title("EVENT LOG")
-        self.ax_events.axis("off")
-
-        event_text = "WAITING FOR EVENTS..." if len(self.event_lines) == 0 else "\n".join(self.event_lines)
-
-        self.ax_events.text(
-            0.02, 0.98, event_text,
-            transform=self.ax_events.transAxes,
-            va="top",
-            ha="left",
-            fontsize=8.8,
-            family="monospace",
-            color="#d7e2ee"
-        )
-
-        mode_label = "REPLAY" if self.replay_mode else "LIVE"
-        self.fig.suptitle(
-            f"FLIGHT COMPUTER GROUND STATION  [{mode_label}]",
-            fontsize=16,
-            fontweight="bold",
-            color="#f5f8fb"
-        )
-
-    def run(self):
-        self.apply_theme()
+        if self.stopped:
+            self.record_event(f"OPERATOR  | command ignored after stop: {cmd}")
+            return
 
         if self.replay_mode:
-            self.load_replay_csv()
-            self.record_event(f"REPLAY    | loaded file: {self.replay_csv_path}")
-        else:
-            self.start_simulator()
-            self.start_reader_thread()
-            self.start_csv_logging()
+            self.record_event(f"REPLAY    | command ignored in replay mode: {cmd}")
+            return
 
-        self.fig = plt.figure(figsize=(15, 9))
-        gs = self.fig.add_gridspec(2, 3)
-
-        self.ax_alt = self.fig.add_subplot(gs[0, 0])
-        self.ax_az = self.fig.add_subplot(gs[0, 1])
-        self.ax_xy = self.fig.add_subplot(gs[1, 0])
-        self.ax_status = self.fig.add_subplot(gs[1, 1])
-        self.ax_events = self.fig.add_subplot(gs[:, 2])
-
-        self.ax_alt_err = self.ax_alt.twinx()
-        self.ax_az_err = self.ax_az.twinx()
-
-        self.setup_buttons()
-
-        self.anim = FuncAnimation(
-            self.fig,
-            self.update_dashboard,
-            interval=200,
-            cache_frame_data=False
-        )
+        if self.process is None or self.process.stdin is None:
+            return
 
         try:
-            self.fig.subplots_adjust(left=0.05, right=0.98, top=0.92, bottom=0.16, wspace=0.28, hspace=0.30)
-            plt.show()
-        finally:
-            self.running = False
-            if not self.replay_mode:
-                self.stop_csv_logging()
-            if self.process and self.process.poll() is None:
-                self.process.terminate()
+            self.process.stdin.write(cmd + "\n")
+            self.process.stdin.flush()
+            self.record_event(f"OPERATOR  | sent command: {cmd}")
+        except BrokenPipeError:
+            self.record_event("OPERATOR  | failed to send command: stdin closed")
+
+    def send_manual_command(self):
+        cmd = self.command_input.text().strip()
+        if cmd:
+            self.send_command(cmd)
+            self.command_input.clear()
+
+    # ---------- rendering ----------
+
+    def update_dashboard(self):
+        if self.replay_mode:
+            self.consume_replay_frames()
+        elif self.live_mode:
+            self.consume_live_output()
+
+        self.render_tiles()
+        self.render_plots()
+        self.render_status()
+        self.render_events()
+
+        source = self.replay_csv_path if self.replay_mode else (self.csv_path.name if self.csv_path else "n/a")
+        mode_label = "REPLAY" if self.replay_mode else ("LIVE" if self.live_mode else "IDLE")
+        self.footer_label.setText(f"Source: {source} | Session: {mode_label} | Current mode: {self.latest_mode}")
+
+    def render_tiles(self):
+        if self.latest_frame is None:
+            self.tile_mode.set_value("--")
+            self.tile_phase.set_value("--")
+            self.tile_health.set_value("--")
+            self.tile_execution.set_value("IDLE")
+            for tile in [self.tile_mode, self.tile_phase, self.tile_health, self.tile_execution]:
+                tile.set_color("#7f8c9a")
+            return
+
+        lf = self.latest_frame
+        execution_state = "STOPPED" if self.stopped else ("PAUSED" if self.paused else "RUNNING")
+        health_text = self.health_status_text(lf.health_status)
+
+        self.tile_mode.set_value(lf.mode)
+        self.tile_phase.set_value(lf.mission_phase)
+        self.tile_health.set_value(health_text)
+        self.tile_execution.set_value(execution_state)
+
+        self.tile_mode.set_color(self.mode_color(lf.mode))
+        self.tile_phase.set_color("#7fb3ff")
+        self.tile_health.set_color(self.health_color(lf.health_status))
+        self.tile_execution.set_color(self.execution_color(execution_state))
+
+    def render_plots(self):
+        # Altitude
+        self.alt_plot.clear(with_secondary=True)
+        self.alt_plot.ax.set_title("ALTITUDE / TRUTH VS MEASURED")
+        self.alt_plot.ax.set_xlabel("Time [s]")
+        self.alt_plot.ax.set_ylabel("Altitude [m]")
+        self.alt_plot.ax2.set_ylabel("Altitude Error [m]")
+
+        if len(self.times) > 0:
+            self.alt_plot.ax.plot(self.times, self.altitudes, linewidth=2.0, label="Measured Altitude")
+            self.alt_plot.ax.plot(self.times, self.truth_altitudes, linewidth=1.8, linestyle="--", label="Truth Altitude")
+            self.alt_plot.ax2.plot(self.times, self.altitude_error, linewidth=1.3, linestyle=":", label="Altitude Error")
+
+        alt_lines, alt_labels = self.alt_plot.ax.get_legend_handles_labels()
+        alt2_lines, alt2_labels = self.alt_plot.ax2.get_legend_handles_labels()
+        self.alt_plot.ax.legend(alt_lines + alt2_lines, alt_labels + alt2_labels, loc="upper left", fontsize=8)
+        self.alt_plot.draw_idle_safe()
+
+        # Accel Z
+        self.accel_plot.clear(with_secondary=True)
+        self.accel_plot.ax.set_title("ACCEL Z / TRUTH VS MEASURED")
+        self.accel_plot.ax.set_xlabel("Time [s]")
+        self.accel_plot.ax.set_ylabel("Accel Z [m/s²]")
+        self.accel_plot.ax2.set_ylabel("Accel Error [m/s²]")
+
+        if len(self.times) > 0:
+            self.accel_plot.ax.plot(self.times, self.accel_z, linewidth=2.0, label="Measured Accel Z")
+            self.accel_plot.ax.plot(self.times, self.truth_accel_z, linewidth=1.8, linestyle="--", label="Truth Accel Z")
+            self.accel_plot.ax2.plot(self.times, self.accel_z_error, linewidth=1.3, linestyle=":", label="Accel Error")
+
+        az_lines, az_labels = self.accel_plot.ax.get_legend_handles_labels()
+        az2_lines, az2_labels = self.accel_plot.ax2.get_legend_handles_labels()
+        self.accel_plot.ax.legend(az_lines + az2_lines, az_labels + az2_labels, loc="upper left", fontsize=8)
+        self.accel_plot.draw_idle_safe()
+
+        # Accel X/Y
+        self.xy_plot.clear(with_secondary=False)
+        self.xy_plot.ax.set_title("ACCEL X / Y")
+        self.xy_plot.ax.set_xlabel("Time [s]")
+        self.xy_plot.ax.set_ylabel("Acceleration [m/s²]")
+
+        if len(self.times) > 0:
+            self.xy_plot.ax.plot(self.times, self.accel_x, linewidth=1.8, label="Accel X")
+            self.xy_plot.ax.plot(self.times, self.accel_y, linewidth=1.8, label="Accel Y")
+
+        self.xy_plot.ax.legend(loc="upper left", fontsize=8)
+        self.xy_plot.draw_idle_safe()
+
+    def render_status(self):
+        if self.latest_frame is None:
+            self.status_text.setPlainText("WAITING FOR TELEMETRY...")
+            return
+
+        lf = self.latest_frame
+        status_text = self.health_status_text(lf.health_status)
+        execution_state = "STOPPED" if self.stopped else ("PAUSED" if self.paused else "RUNNING")
+        replay_label = f"{self.replay_index}/{len(self.replay_frames)}" if self.replay_mode else "LIVE"
+
+        panel_text = (
+            f"MODE:            {lf.mode}\n"
+            f"EXECUTION:       {execution_state}\n"
+            f"PHASE:           {lf.mission_phase}\n"
+            f"TIME:            {lf.time_ms / 1000.0:.1f} s\n\n"
+            f"TRUTH ALT:       {lf.truth_altitude_m:.2f} m\n"
+            f"TRUTH VEL Z:     {lf.truth_velocity_z_mps:.2f} m/s\n"
+            f"TRUTH ACCEL Z:   {lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
+            f"MEAS ALT:        {lf.altitude_m:.2f} m\n"
+            f"MEAS ACCEL Z:    {lf.az:.2f} m/s²\n"
+            f"ALT ERROR:       {lf.altitude_m - lf.truth_altitude_m:.2f} m\n"
+            f"ACCEL ERROR:     {lf.az - lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
+            f"IMU VALID:       {lf.imu_valid}\n"
+            f"ALT VALID:       {lf.alt_valid}\n"
+            f"HEALTH:          {status_text}\n\n"
+            f"IMU FAULT CNT:   {lf.imu_fault_count}\n"
+            f"IMU REC CNT:     {lf.imu_recovery_count}\n"
+            f"ALT FAULT CNT:   {lf.alt_fault_count}\n"
+            f"ALT REC CNT:     {lf.alt_recovery_count}\n\n"
+            f"IMU LATCHED:     {lf.imu_latched}\n"
+            f"ALT LATCHED:     {lf.alt_latched}\n\n"
+            f"REPLAY FRAME:    {replay_label}"
+        )
+
+        self.status_text.setPlainText(panel_text)
+
+    def render_events(self):
+        if len(self.event_lines) == 0:
+            self.events_text.setPlainText("WAITING FOR EVENTS...")
+        else:
+            self.events_text.setPlainText("\n".join(self.event_lines))
+
+    # ---------- lifecycle ----------
+
+    def closeEvent(self, event):
+        self.stop_process_if_running()
+        event.accept()
 
 
 if __name__ == "__main__":
-    gs = GroundStation(EXECUTABLE_PATH)
-    gs.run()
+    app = QApplication(sys.argv)
+    window = GroundStationWindow()
+    window.show()
+    sys.exit(app.exec())
