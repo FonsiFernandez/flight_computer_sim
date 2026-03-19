@@ -10,7 +10,7 @@ from pathlib import Path
 from datetime import datetime
 from collections import deque
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QTextEdit, QLabel, QFileDialog, QLineEdit, QGroupBox,
@@ -21,10 +21,10 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 
-EXECUTABLE_PATH = r"C:\Users\Alfonso.Fernandez\CLionProjects\flight-computer-sim\flight-software\cmake-build-debug\flight_computer_sim.exe"
+DEFAULT_EXECUTABLE_PATH = r"C:\Users\Alfonso.Fernandez\CLionProjects\flight-computer-sim\flight-software\cmake-build-debug\flight_computer_sim.exe"
 REPLAY_STEP_FRAMES = 1
 MAX_POINTS = 300
-MAX_EVENTS = 100
+MAX_EVENTS = 200
 
 LOG_LINE_PATTERN = re.compile(
     r"\[(?P<level>INFO|WARN|ERROR)\]\[T\+(?P<time>\d+)\s+ms\]\s+(?P<message>.+)"
@@ -134,8 +134,9 @@ class GroundStationWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Flight Computer Ground Station")
-        self.resize(1700, 980)
+        self.resize(1760, 1000)
 
+        self.executable_path = DEFAULT_EXECUTABLE_PATH
         self.process = None
         self.output_queue = queue.Queue()
         self.reader_thread = None
@@ -153,6 +154,9 @@ class GroundStationWindow(QMainWindow):
         self.csv_file = None
         self.csv_writer = None
         self.csv_path = None
+
+        self.event_log_file = None
+        self.event_log_path = None
 
         self.times = deque(maxlen=MAX_POINTS)
         self.altitudes = deque(maxlen=MAX_POINTS)
@@ -229,15 +233,16 @@ class GroundStationWindow(QMainWindow):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
-        # Top controls
         controls = QHBoxLayout()
 
+        self.btn_select_exe = QPushButton("Select EXE")
         self.btn_start_live = QPushButton("Start Live")
         self.btn_open_replay = QPushButton("Open Replay")
         self.btn_pause = QPushButton("Pause")
         self.btn_resume = QPushButton("Resume")
         self.btn_restart = QPushButton("Restart Replay")
         self.btn_stop = QPushButton("Stop")
+        self.btn_screenshot = QPushButton("Screenshot")
 
         self.btn_reset_warn = QPushButton("Reset Warn")
         self.btn_reset_all = QPushButton("Reset All")
@@ -251,8 +256,9 @@ class GroundStationWindow(QMainWindow):
         self.btn_send = QPushButton("Send")
 
         for w in [
-            self.btn_start_live, self.btn_open_replay, self.btn_pause, self.btn_resume,
-            self.btn_restart, self.btn_stop, self.btn_reset_warn, self.btn_reset_all,
+            self.btn_select_exe, self.btn_start_live, self.btn_open_replay,
+            self.btn_pause, self.btn_resume, self.btn_restart, self.btn_stop,
+            self.btn_screenshot, self.btn_reset_warn, self.btn_reset_all,
             self.btn_force_nom, self.btn_force_safe, self.btn_status, self.btn_help
         ]:
             controls.addWidget(w)
@@ -261,7 +267,6 @@ class GroundStationWindow(QMainWindow):
         controls.addWidget(self.btn_send)
         root.addLayout(controls)
 
-        # Tiles
         tiles_layout = QHBoxLayout()
         self.tile_mode = StatusTile("MODE")
         self.tile_phase = StatusTile("PHASE")
@@ -274,7 +279,6 @@ class GroundStationWindow(QMainWindow):
         tiles_layout.addWidget(self.tile_execution)
         root.addLayout(tiles_layout)
 
-        # Main grid
         grid = QGridLayout()
         grid.setSpacing(10)
         root.addLayout(grid, 1)
@@ -295,16 +299,17 @@ class GroundStationWindow(QMainWindow):
         grid.addWidget(self._wrap_group("System Status", self.status_text), 1, 1)
         grid.addWidget(self._wrap_group("Event Log", self.events_text), 0, 2, 2, 1)
 
-        self.footer_label = QLabel("Source: n/a | Mode: IDLE")
+        self.footer_label = QLabel("Source: n/a | Session: IDLE | Current mode: UNKNOWN")
         root.addWidget(self.footer_label)
 
-        # Signals
+        self.btn_select_exe.clicked.connect(self.select_executable)
         self.btn_start_live.clicked.connect(self.start_live)
         self.btn_open_replay.clicked.connect(self.open_replay_file)
         self.btn_pause.clicked.connect(self.pause)
         self.btn_resume.clicked.connect(self.resume)
         self.btn_restart.clicked.connect(self.restart_replay)
         self.btn_stop.clicked.connect(self.stop_execution)
+        self.btn_screenshot.clicked.connect(self.save_screenshot)
 
         self.btn_reset_warn.clicked.connect(lambda: self.send_command("reset_warnings"))
         self.btn_reset_all.clicked.connect(lambda: self.send_command("reset_all"))
@@ -422,8 +427,25 @@ class GroundStationWindow(QMainWindow):
 
     # ---------- state/buffers ----------
 
+    def start_event_logging(self, source_name: str):
+        logs_dir = Path("logs")
+        logs_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_source = source_name.replace("\\", "_").replace("/", "_").replace(":", "_")
+        self.event_log_path = logs_dir / f"events_{timestamp}_{safe_source}.log"
+        self.event_log_file = open(self.event_log_path, "w", encoding="utf-8")
+
+    def stop_event_logging(self):
+        if self.event_log_file is not None:
+            self.event_log_file.close()
+            self.event_log_file = None
+            self.event_log_path = None
+
     def record_event(self, text: str):
         self.event_lines.appendleft(text)
+        if self.event_log_file is not None:
+            self.event_log_file.write(text + "\n")
+            self.event_log_file.flush()
 
     def record_mode_transition_if_needed(self, frame: TelemetryFrame):
         if frame.mode != self.last_transition_mode:
@@ -530,8 +552,20 @@ class GroundStationWindow(QMainWindow):
             self.csv_file.close()
             self.csv_file = None
             self.csv_writer = None
+            self.csv_path = None
 
     # ---------- live ----------
+
+    def select_executable(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select simulator executable",
+            "",
+            "Executable Files (*.exe);;All Files (*)"
+        )
+        if file_path:
+            self.executable_path = file_path
+            self.record_event(f"LIVE      | executable selected: {file_path}")
 
     def start_live(self):
         self.stop_process_if_running()
@@ -544,7 +578,7 @@ class GroundStationWindow(QMainWindow):
 
         try:
             self.process = subprocess.Popen(
-                [EXECUTABLE_PATH],
+                [self.executable_path],
                 stdout=subprocess.PIPE,
                 stdin=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -552,15 +586,16 @@ class GroundStationWindow(QMainWindow):
                 bufsize=1
             )
         except FileNotFoundError:
-            QMessageBox.critical(self, "Error", f"Executable not found:\n{EXECUTABLE_PATH}")
+            QMessageBox.critical(self, "Error", f"Executable not found:\n{self.executable_path}")
             return
 
         self.start_csv_logging()
+        self.start_event_logging("live")
         self.running_reader = True
         self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self.reader_thread.start()
 
-        self.record_event("LIVE      | simulator started")
+        self.record_event(f"LIVE      | simulator started: {self.executable_path}")
 
     def _reader_loop(self):
         if self.process is None or self.process.stdout is None:
@@ -600,6 +635,7 @@ class GroundStationWindow(QMainWindow):
                 pass
         self.process = None
         self.stop_csv_logging()
+        self.stop_event_logging()
 
     # ---------- replay ----------
 
@@ -654,6 +690,7 @@ class GroundStationWindow(QMainWindow):
                     )
                 )
 
+        self.start_event_logging("replay")
         self.record_event(f"REPLAY    | loaded file: {file_path}")
 
     def consume_replay_frames(self):
@@ -699,6 +736,14 @@ class GroundStationWindow(QMainWindow):
         if self.live_mode:
             self.stop_process_if_running()
 
+    def save_screenshot(self):
+        out_dir = Path("logs")
+        out_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = out_dir / f"screenshot_{timestamp}.png"
+        self.grab().save(str(out_path))
+        self.record_event(f"OPERATOR  | screenshot saved: {out_path}")
+
     def send_command(self, cmd: str):
         cmd = cmd.strip()
         if not cmd:
@@ -730,6 +775,13 @@ class GroundStationWindow(QMainWindow):
 
     # ---------- rendering ----------
 
+    def draw_transition_lines(self, plot_widget):
+        if not self.mode_transitions:
+            return
+        for t_s, mode in self.mode_transitions:
+            color = self.mode_color(mode)
+            plot_widget.ax.axvline(t_s, color=color, linestyle="--", linewidth=1.0, alpha=0.55)
+
     def update_dashboard(self):
         if self.replay_mode:
             self.consume_replay_frames()
@@ -742,8 +794,8 @@ class GroundStationWindow(QMainWindow):
         self.render_events()
 
         source = self.replay_csv_path if self.replay_mode else (self.csv_path.name if self.csv_path else "n/a")
-        mode_label = "REPLAY" if self.replay_mode else ("LIVE" if self.live_mode else "IDLE")
-        self.footer_label.setText(f"Source: {source} | Session: {mode_label} | Current mode: {self.latest_mode}")
+        session = "REPLAY" if self.replay_mode else ("LIVE" if self.live_mode else "IDLE")
+        self.footer_label.setText(f"Source: {source} | Session: {session} | Current mode: {self.latest_mode}")
 
     def render_tiles(self):
         if self.latest_frame is None:
@@ -782,6 +834,8 @@ class GroundStationWindow(QMainWindow):
             self.alt_plot.ax.plot(self.times, self.truth_altitudes, linewidth=1.8, linestyle="--", label="Truth Altitude")
             self.alt_plot.ax2.plot(self.times, self.altitude_error, linewidth=1.3, linestyle=":", label="Altitude Error")
 
+        self.draw_transition_lines(self.alt_plot)
+
         alt_lines, alt_labels = self.alt_plot.ax.get_legend_handles_labels()
         alt2_lines, alt2_labels = self.alt_plot.ax2.get_legend_handles_labels()
         self.alt_plot.ax.legend(alt_lines + alt2_lines, alt_labels + alt2_labels, loc="upper left", fontsize=8)
@@ -799,6 +853,8 @@ class GroundStationWindow(QMainWindow):
             self.accel_plot.ax.plot(self.times, self.truth_accel_z, linewidth=1.8, linestyle="--", label="Truth Accel Z")
             self.accel_plot.ax2.plot(self.times, self.accel_z_error, linewidth=1.3, linestyle=":", label="Accel Error")
 
+        self.draw_transition_lines(self.accel_plot)
+
         az_lines, az_labels = self.accel_plot.ax.get_legend_handles_labels()
         az2_lines, az2_labels = self.accel_plot.ax2.get_legend_handles_labels()
         self.accel_plot.ax.legend(az_lines + az2_lines, az_labels + az2_labels, loc="upper left", fontsize=8)
@@ -813,6 +869,8 @@ class GroundStationWindow(QMainWindow):
         if len(self.times) > 0:
             self.xy_plot.ax.plot(self.times, self.accel_x, linewidth=1.8, label="Accel X")
             self.xy_plot.ax.plot(self.times, self.accel_y, linewidth=1.8, label="Accel Y")
+
+        self.draw_transition_lines(self.xy_plot)
 
         self.xy_plot.ax.legend(loc="upper left", fontsize=8)
         self.xy_plot.draw_idle_safe()
@@ -848,7 +906,8 @@ class GroundStationWindow(QMainWindow):
             f"ALT REC CNT:     {lf.alt_recovery_count}\n\n"
             f"IMU LATCHED:     {lf.imu_latched}\n"
             f"ALT LATCHED:     {lf.alt_latched}\n\n"
-            f"REPLAY FRAME:    {replay_label}"
+            f"REPLAY FRAME:    {replay_label}\n"
+            f"EVENT LOG FILE:  {self.event_log_path.name if self.event_log_path else 'n/a'}"
         )
 
         self.status_text.setPlainText(panel_text)
