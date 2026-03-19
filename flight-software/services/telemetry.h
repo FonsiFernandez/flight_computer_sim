@@ -8,6 +8,8 @@ void telemetry_send(uint64_t elapsed_ms,
                     system_mode_t mode,
                     imu_data_t imu,
                     altimeter_data_t alt,
+                    gps_data_t gps,
+                    hk_data_t hk,
                     const vehicle_truth_t* truth,
                     const char* mission_phase);
 

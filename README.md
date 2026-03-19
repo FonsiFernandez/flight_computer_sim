@@ -1,6 +1,6 @@
 # Flight Computer Simulation (Embedded Systems – Aerospace Focus)
 
-![img.png](flight-software/res/img.png)
+![img.png](res/img.png)
 
 ## Overview
 
@@ -17,7 +17,7 @@ It implements a simplified On-Board Computer (OBC) architecture, including:
 
 The goal is to build a clean, modular, and testable embedded software architecture, similar in structure to real aerospace systems.
 
-![img_1.png](flight-software/res/img_1.png)
+![img_2.png](res/img_2.png)
 
 ---
 

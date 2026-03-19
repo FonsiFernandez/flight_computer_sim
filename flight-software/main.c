@@ -1,6 +1,8 @@
 #include "bsp/time_port.h"
 #include "drivers/imu_sim.h"
 #include "drivers/altimeter_sim.h"
+#include "drivers/gps_sim.h"
+#include "drivers/hk_sim.h"
 #include "app/state_machine.h"
 #include "common/config.h"
 #include "services/health_monitor.h"
@@ -12,6 +14,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 static void process_command(command_t cmd) {
     if (!cmd.valid) {
@@ -22,31 +25,24 @@ static void process_command(command_t cmd) {
     switch (cmd.type) {
         case COMMAND_NONE:
             break;
-
         case COMMAND_STATUS:
             logger_info("Status command received.");
             break;
-
         case COMMAND_RESET_WARNINGS:
             fault_manager_process_manual_reset_warnings();
             break;
-
         case COMMAND_RESET_ALL:
             fault_manager_process_manual_reset_all();
             break;
-
         case COMMAND_FORCE_NOMINAL:
             fault_manager_force_mode(MODE_NOMINAL);
             break;
-
         case COMMAND_FORCE_SAFE:
             fault_manager_force_mode(MODE_SAFE);
             break;
-
         case COMMAND_HELP:
             logger_info("Commands: status, reset_warnings, reset_all, force_nominal, force_safe, help, quit");
             break;
-
         case COMMAND_QUIT:
             logger_warn("Quit command received. Stopping simulation.");
             break;
@@ -55,26 +51,28 @@ static void process_command(command_t cmd) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
+
     logger_init();
     logger_info("Flight Computer Sim START");
 
+    vehicle_model_init();
     imu_sim_init();
     altimeter_sim_init();
+    gps_sim_init();
+    hk_sim_init();
+
     state_machine_init();
     health_monitor_init();
     fault_manager_init();
     command_init();
-    vehicle_model_init();
 
     state_machine_set_mode(MODE_NOMINAL);
     logger_info("System entered NOMINAL mode");
 
     uint64_t start = time_now_ms();
     system_mode_t last_mode = MODE_INIT;
-    bool running = true;
 
-    while (running) {
-        vehicle_model_step(VEHICLE_DT_S);
+    while (1) {
         command_t cmd = command_poll();
         if (cmd.type == COMMAND_QUIT) {
             process_command(cmd);
@@ -85,8 +83,12 @@ int main(void) {
         uint64_t now = time_now_ms();
         uint64_t elapsed = now - start;
 
+        vehicle_model_step(VEHICLE_DT_S);
+
         imu_data_t imu = imu_sim_read();
         altimeter_data_t alt = altimeter_sim_read();
+        gps_data_t gps = gps_sim_read();
+        hk_data_t hk = hk_sim_read();
 
         health_status_t health = health_monitor_update(imu, alt);
         system_mode_t current_mode = state_machine_get_mode();
@@ -111,7 +113,8 @@ int main(void) {
 
         const vehicle_truth_t* truth = vehicle_model_get_truth();
         const char* mission_phase = vehicle_model_get_phase();
-        telemetry_send(elapsed, current_mode, imu, alt, truth, mission_phase);
+
+        telemetry_send(elapsed, current_mode, imu, alt, gps, hk, truth, mission_phase);
 
         switch (current_mode) {
             case MODE_SAFE:

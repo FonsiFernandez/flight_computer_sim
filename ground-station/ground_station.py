@@ -30,7 +30,6 @@ LOG_LINE_PATTERN = re.compile(
     r"\[(?P<level>INFO|WARN|ERROR)\]\[T\+(?P<time>\d+)\s+ms\]\s+(?P<message>.+)"
 )
 
-
 @dataclass
 class TelemetryFrame:
     time_ms: int
@@ -40,12 +39,21 @@ class TelemetryFrame:
     truth_altitude_m: float
     truth_velocity_z_mps: float
     truth_acceleration_z_mps2: float
+    truth_pitch_deg: float
+    truth_pitch_rate_dps: float
     ax: float
     ay: float
     az: float
+    gyro_z_dps: float
     imu_valid: int
     altitude_m: float
     alt_valid: int
+    gps_altitude_m: float
+    gps_velocity_z_mps: float
+    gps_fix_valid: int
+    battery_voltage_v: float
+    board_temp_c: float
+    hk_valid: int
     imu_fault_count: int
     imu_recovery_count: int
     alt_fault_count: int
@@ -53,7 +61,6 @@ class TelemetryFrame:
     imu_latched: int
     alt_latched: int
     health_status: int
-
 
 class PlotWidget(FigureCanvas):
     def __init__(self):
@@ -132,6 +139,11 @@ class StatusTile(QFrame):
 class GroundStationWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+
+        self.gps_altitudes = deque(maxlen=MAX_POINTS)
+        self.battery_voltage = deque(maxlen=MAX_POINTS)
+        self.board_temp = deque(maxlen=MAX_POINTS)
+        self.gyro_z = deque(maxlen=MAX_POINTS)
 
         self.setWindowTitle("Flight Computer Ground Station")
         self.resize(1760, 1000)
@@ -272,7 +284,13 @@ class GroundStationWindow(QMainWindow):
         self.tile_phase = StatusTile("PHASE")
         self.tile_health = StatusTile("HEALTH")
         self.tile_execution = StatusTile("EXECUTION")
+        self.tile_gps = StatusTile("GPS FIX")
+        self.tile_battery = StatusTile("BATTERY")
+        self.tile_temp = StatusTile("TEMP")
 
+        tiles_layout.addWidget(self.tile_gps)
+        tiles_layout.addWidget(self.tile_battery)
+        tiles_layout.addWidget(self.tile_temp)
         tiles_layout.addWidget(self.tile_mode)
         tiles_layout.addWidget(self.tile_phase)
         tiles_layout.addWidget(self.tile_health)
@@ -286,6 +304,7 @@ class GroundStationWindow(QMainWindow):
         self.alt_plot = PlotWidget()
         self.accel_plot = PlotWidget()
         self.xy_plot = PlotWidget()
+        self.hk_plot = PlotWidget();
 
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
@@ -296,8 +315,9 @@ class GroundStationWindow(QMainWindow):
         grid.addWidget(self._wrap_group("Altitude / Truth vs Measured", self.alt_plot), 0, 0)
         grid.addWidget(self._wrap_group("Accel Z / Truth vs Measured", self.accel_plot), 0, 1)
         grid.addWidget(self._wrap_group("Accel X / Y", self.xy_plot), 1, 0)
-        grid.addWidget(self._wrap_group("System Status", self.status_text), 1, 1)
-        grid.addWidget(self._wrap_group("Event Log", self.events_text), 0, 2, 2, 1)
+        grid.addWidget(self._wrap_group("Battery / Temperature", self.hk_plot), 1, 1)
+        grid.addWidget(self._wrap_group("System Status", self.status_text), 0, 2)
+        grid.addWidget(self._wrap_group("Event Log", self.events_text), 1, 2)
 
         self.footer_label = QLabel("Source: n/a | Session: IDLE | Current mode: UNKNOWN")
         root.addWidget(self.footer_label)
@@ -390,22 +410,39 @@ class GroundStationWindow(QMainWindow):
         truth = data.get("truth", {})
         imu = data.get("imu", {})
         altimeter = data.get("altimeter", {})
+        gps = data.get("gps", {})
+        hk = data.get("hk", {})
         health = data.get("health", {})
 
         return TelemetryFrame(
             time_ms=int(data.get("time_ms", 0)),
             mode=str(data.get("mode", "UNKNOWN")),
             mission_phase=str(data.get("mission_phase", "UNKNOWN")),
+
             truth_time_s=float(truth.get("time_s", 0.0)),
             truth_altitude_m=float(truth.get("altitude_m", 0.0)),
             truth_velocity_z_mps=float(truth.get("velocity_z_mps", 0.0)),
             truth_acceleration_z_mps2=float(truth.get("acceleration_z_mps2", 0.0)),
+            truth_pitch_deg=float(truth.get("pitch_deg", 0.0)),
+            truth_pitch_rate_dps=float(truth.get("pitch_rate_dps", 0.0)),
+
             ax=float(imu.get("x", 0.0)),
             ay=float(imu.get("y", 0.0)),
             az=float(imu.get("z", 0.0)),
+            gyro_z_dps=float(imu.get("gyro_z_dps", 0.0)),
             imu_valid=int(imu.get("valid", 0)),
+
             altitude_m=float(altimeter.get("altitude_m", 0.0)),
             alt_valid=int(altimeter.get("valid", 0)),
+
+            gps_altitude_m=float(gps.get("altitude_m", 0.0)),
+            gps_velocity_z_mps=float(gps.get("velocity_z_mps", 0.0)),
+            gps_fix_valid=int(gps.get("fix_valid", 0)),
+
+            battery_voltage_v=float(hk.get("battery_voltage_v", 0.0)),
+            board_temp_c=float(hk.get("board_temp_c", 0.0)),
+            hk_valid=int(hk.get("valid", 0)),
+
             imu_fault_count=int(health.get("imu_fault_count", 0)),
             imu_recovery_count=int(health.get("imu_recovery_count", 0)),
             alt_fault_count=int(health.get("alt_fault_count", 0)),
@@ -468,6 +505,10 @@ class GroundStationWindow(QMainWindow):
         self.latest_frame = telemetry
         self.latest_mode = telemetry.mode
         self.record_mode_transition_if_needed(telemetry)
+        self.gps_altitudes.append(telemetry.gps_altitude_m)
+        self.battery_voltage.append(telemetry.battery_voltage_v)
+        self.board_temp.append(telemetry.board_temp_c)
+        self.gyro_z.append(telemetry.gyro_z_dps)
 
     def reset_buffers(self):
         self.times.clear()
@@ -479,6 +520,10 @@ class GroundStationWindow(QMainWindow):
         self.truth_accel_z.clear()
         self.altitude_error.clear()
         self.accel_z_error.clear()
+        self.gps_altitudes.clear()
+        self.battery_voltage.clear()
+        self.board_temp.clear()
+        self.gyro_z.clear()
         self.latest_frame = None
         self.latest_mode = "UNKNOWN"
         self.mode_transitions.clear()
@@ -504,12 +549,21 @@ class GroundStationWindow(QMainWindow):
             "truth_altitude_m",
             "truth_velocity_z_mps",
             "truth_acceleration_z_mps2",
+            "truth_pitch_deg",
+            "truth_pitch_rate_dps",
             "ax",
             "ay",
             "az",
+            "gyro_z_dps",
             "imu_valid",
             "altitude_m",
             "alt_valid",
+            "gps_altitude_m",
+            "gps_velocity_z_mps",
+            "gps_fix_valid",
+            "battery_voltage_v",
+            "board_temp_c",
+            "hk_valid",
             "imu_fault_count",
             "imu_recovery_count",
             "alt_fault_count",
@@ -531,12 +585,21 @@ class GroundStationWindow(QMainWindow):
             frame.truth_altitude_m,
             frame.truth_velocity_z_mps,
             frame.truth_acceleration_z_mps2,
+            frame.truth_pitch_deg,
+            frame.truth_pitch_rate_dps,
             frame.ax,
             frame.ay,
             frame.az,
+            frame.gyro_z_dps,
             frame.imu_valid,
             frame.altitude_m,
             frame.alt_valid,
+            frame.gps_altitude_m,
+            frame.gps_velocity_z_mps,
+            frame.gps_fix_valid,
+            frame.battery_voltage_v,
+            frame.board_temp_c,
+            frame.hk_valid,
             frame.imu_fault_count,
             frame.imu_recovery_count,
             frame.alt_fault_count,
@@ -821,6 +884,16 @@ class GroundStationWindow(QMainWindow):
         self.tile_health.set_color(self.health_color(lf.health_status))
         self.tile_execution.set_color(self.execution_color(execution_state))
 
+        gps_text = "OK" if lf.gps_fix_valid else "NO FIX"
+        self.tile_gps.set_value(gps_text)
+        self.tile_gps.set_color("#33d17a" if lf.gps_fix_valid else "#ff5c5c")
+
+        self.tile_battery.set_value(f"{lf.battery_voltage_v:.2f} V")
+        self.tile_battery.set_color("#33d17a" if lf.battery_voltage_v > 14 else "#ffb347")
+
+        self.tile_temp.set_value(f"{lf.board_temp_c:.1f} °C")
+        self.tile_temp.set_color("#33d17a" if lf.board_temp_c < 50 else "#ff5c5c")
+
     def render_plots(self):
         # Altitude
         self.alt_plot.clear(with_secondary=True)
@@ -831,8 +904,11 @@ class GroundStationWindow(QMainWindow):
 
         if len(self.times) > 0:
             self.alt_plot.ax.plot(self.times, self.altitudes, linewidth=2.0, label="Measured Altitude")
-            self.alt_plot.ax.plot(self.times, self.truth_altitudes, linewidth=1.8, linestyle="--", label="Truth Altitude")
-            self.alt_plot.ax2.plot(self.times, self.altitude_error, linewidth=1.3, linestyle=":", label="Altitude Error")
+            self.alt_plot.ax.plot(self.times, self.truth_altitudes, linewidth=1.8, linestyle="--",
+                                  label="Truth Altitude")
+            self.alt_plot.ax.plot(self.times, self.gps_altitudes, linewidth=1.5, linestyle=":", label="GPS Altitude")
+            self.alt_plot.ax2.plot(self.times, self.altitude_error, linewidth=1.3, linestyle=":",
+                                   label="Altitude Error")
 
         self.draw_transition_lines(self.alt_plot)
 
@@ -850,7 +926,8 @@ class GroundStationWindow(QMainWindow):
 
         if len(self.times) > 0:
             self.accel_plot.ax.plot(self.times, self.accel_z, linewidth=2.0, label="Measured Accel Z")
-            self.accel_plot.ax.plot(self.times, self.truth_accel_z, linewidth=1.8, linestyle="--", label="Truth Accel Z")
+            self.accel_plot.ax.plot(self.times, self.truth_accel_z, linewidth=1.8, linestyle="--",
+                                    label="Truth Accel Z")
             self.accel_plot.ax2.plot(self.times, self.accel_z_error, linewidth=1.3, linestyle=":", label="Accel Error")
 
         self.draw_transition_lines(self.accel_plot)
@@ -869,11 +946,33 @@ class GroundStationWindow(QMainWindow):
         if len(self.times) > 0:
             self.xy_plot.ax.plot(self.times, self.accel_x, linewidth=1.8, label="Accel X")
             self.xy_plot.ax.plot(self.times, self.accel_y, linewidth=1.8, label="Accel Y")
+            self.xy_plot.ax.plot(self.times, self.gyro_z, linewidth=1.4, linestyle="--", label="Gyro Z [dps]")
 
         self.draw_transition_lines(self.xy_plot)
 
-        self.xy_plot.ax.legend(loc="upper left", fontsize=8)
+        handles, labels = self.xy_plot.ax.get_legend_handles_labels()
+        if handles:
+            self.xy_plot.ax.legend(loc="upper left", fontsize=8)
         self.xy_plot.draw_idle_safe()
+
+        # Battery / Temperature
+        self.hk_plot.clear(with_secondary=True)
+        self.hk_plot.ax.set_title("BATTERY / TEMPERATURE")
+        self.hk_plot.ax.set_xlabel("Time [s]")
+        self.hk_plot.ax.set_ylabel("Battery [V]")
+        self.hk_plot.ax2.set_ylabel("Temperature [°C]")
+
+        if len(self.times) > 0:
+            self.hk_plot.ax.plot(self.times, self.battery_voltage, linewidth=1.8, label="Battery [V]")
+            self.hk_plot.ax2.plot(self.times, self.board_temp, linewidth=1.8, linestyle="--", label="Temp [°C]")
+
+        self.draw_transition_lines(self.hk_plot)
+
+        h1, l1 = self.hk_plot.ax.get_legend_handles_labels()
+        h2, l2 = self.hk_plot.ax2.get_legend_handles_labels()
+        if h1 or h2:
+            self.hk_plot.ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=8)
+        self.hk_plot.draw_idle_safe()
 
     def render_status(self):
         if self.latest_frame is None:
@@ -890,24 +989,40 @@ class GroundStationWindow(QMainWindow):
             f"EXECUTION:       {execution_state}\n"
             f"PHASE:           {lf.mission_phase}\n"
             f"TIME:            {lf.time_ms / 1000.0:.1f} s\n\n"
+
             f"TRUTH ALT:       {lf.truth_altitude_m:.2f} m\n"
             f"TRUTH VEL Z:     {lf.truth_velocity_z_mps:.2f} m/s\n"
-            f"TRUTH ACCEL Z:   {lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
+            f"TRUTH ACCEL Z:   {lf.truth_acceleration_z_mps2:.2f} m/s²\n"
+            f"TRUTH PITCH:     {lf.truth_pitch_deg:.2f} deg\n"
+            f"TRUTH PITCH RT:  {lf.truth_pitch_rate_dps:.2f} dps\n\n"
+
             f"MEAS ALT:        {lf.altitude_m:.2f} m\n"
+            f"GPS ALT:         {lf.gps_altitude_m:.2f} m\n"
+            f"GPS VEL Z:       {lf.gps_velocity_z_mps:.2f} m/s\n"
             f"MEAS ACCEL Z:    {lf.az:.2f} m/s²\n"
+            f"GYRO Z:          {lf.gyro_z_dps:.2f} dps\n"
             f"ALT ERROR:       {lf.altitude_m - lf.truth_altitude_m:.2f} m\n"
             f"ACCEL ERROR:     {lf.az - lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
+
+            f"BATTERY:         {lf.battery_voltage_v:.2f} V\n"
+            f"TEMP:            {lf.board_temp_c:.2f} °C\n"
+            f"HK VALID:        {lf.hk_valid}\n\n"
+
             f"IMU VALID:       {lf.imu_valid}\n"
             f"ALT VALID:       {lf.alt_valid}\n"
+            f"GPS FIX:         {lf.gps_fix_valid}\n"
             f"HEALTH:          {status_text}\n\n"
+
             f"IMU FAULT CNT:   {lf.imu_fault_count}\n"
             f"IMU REC CNT:     {lf.imu_recovery_count}\n"
             f"ALT FAULT CNT:   {lf.alt_fault_count}\n"
             f"ALT REC CNT:     {lf.alt_recovery_count}\n\n"
+
             f"IMU LATCHED:     {lf.imu_latched}\n"
             f"ALT LATCHED:     {lf.alt_latched}\n\n"
+
             f"REPLAY FRAME:    {replay_label}\n"
-            f"EVENT LOG FILE:  {self.event_log_path.name if self.event_log_path else 'n/a'}"
+            f"EVENT LOG FILE:  {self.event_log_path.name if self.event_log_path else 'n/a'}\n"
         )
 
         self.status_text.setPlainText(panel_text)

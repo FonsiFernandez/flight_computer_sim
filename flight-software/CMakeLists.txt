@@ -10,6 +10,8 @@ add_executable(flight_computer_sim
         bsp/uart_port.c
         drivers/imu_sim.c
         drivers/altimeter_sim.c
+        drivers/gps_sim.c
+        drivers/hk_sim.c
         app/state_machine.c
         services/health_monitor.c
         services/logger.c

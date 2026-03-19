@@ -8,12 +8,15 @@ typedef struct {
     float altitude_m;
     float velocity_z_mps;
     float acceleration_z_mps2;
+    float pitch_deg;
+    float pitch_rate_dps;
 } vehicle_truth_t;
 
 typedef struct {
     float accel_x;
     float accel_y;
     float accel_z;
+    float gyro_z_dps;
     bool valid;
 } imu_data_t;
 
@@ -21,6 +24,18 @@ typedef struct {
     float altitude_m;
     bool valid;
 } altimeter_data_t;
+
+typedef struct {
+    float altitude_m;
+    float velocity_z_mps;
+    bool fix_valid;
+} gps_data_t;
+
+typedef struct {
+    float battery_voltage_v;
+    float board_temp_c;
+    bool valid;
+} hk_data_t;
 
 typedef enum {
     MODE_INIT = 0,

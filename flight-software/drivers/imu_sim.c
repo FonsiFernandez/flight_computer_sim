@@ -24,6 +24,7 @@ imu_data_t imu_sim_read(void) {
     data.accel_x = IMU_BIAS_X + random_symmetric(IMU_NOISE_X);
     data.accel_y = IMU_BIAS_Y + random_symmetric(IMU_NOISE_Y);
     data.accel_z = truth->acceleration_z_mps2 + IMU_BIAS_Z + random_symmetric(IMU_NOISE_Z);
+    data.gyro_z_dps = truth->pitch_rate_dps + IMU_GYRO_Z_BIAS_DPS + random_symmetric(IMU_GYRO_Z_NOISE_DPS);
     data.valid = true;
 
     if (sample_count >= IMU_FAILURE_START_SAMPLE &&
