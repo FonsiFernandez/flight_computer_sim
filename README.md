@@ -1,23 +1,53 @@
-# Flight Computer Simulation (Embedded Systems – Aerospace Focus)
+# Flight Computer Simulation  
+**Embedded Systems Project with Aerospace Focus**
 
-![img.png](res/img.png)
+![Ground Station](res/img.png)
 
 ## Overview
 
-This project is a flight computer simulation written in C, designed to model core concepts found in embedded systems for aerospace applications.
+This project is a modular flight computer simulation written in **C**, with a **Python/Qt ground station** for visualization and operator interaction.
 
-It implements a simplified On-Board Computer (OBC) architecture, including:
+It is designed as a learning and portfolio project to explore software patterns commonly found in **embedded** and **aerospace** systems:
 
-* Sensor simulation (IMU and altimeter)
-* Health monitoring with fault detection
-* Fault management and system mode transitions
-* Telemetry generation
-* Command handling (simulated ground interaction)
-* Unit testing of critical logic
+- sensor acquisition and simulation
+- health monitoring and fault detection
+- mode management (`NOMINAL`, `DEGRADED`, `SAFE`)
+- telemetry generation
+- command handling
+- replay and analysis tools
+- unit testing of critical logic
 
-The goal is to build a clean, modular, and testable embedded software architecture, similar in structure to real aerospace systems.
+The goal is not to build a full real-world flight stack, but a clean and extensible software architecture inspired by **on-board computer / flight software** design.
 
-![img_1.png](res/img_1.png)
+![Ground Station UI](res/img_1.png)
+
+---
+
+## Main Components
+
+### Flight Software (C)
+
+The embedded side is organized into small modules with clear responsibilities:
+
+- `bsp/` → platform abstraction (`time`, `uart`)
+- `drivers/` → simulated sensors (`IMU`, `altimeter`, `GPS`, housekeeping)
+- `simulation/` → vehicle truth model and geographic reference logic
+- `services/` → telemetry, logging, health monitoring, fault management
+- `app/` → system state machine
+- `comms/` → command parsing and console interaction
+- `common/` → shared types and configuration
+
+### Ground Station (Python + Qt)
+
+The ground station provides:
+
+- live telemetry visualization
+- command sending
+- replay from recorded CSV files
+- event log display
+- multiple plots for vehicle and sensor data
+- ground track view with geographic position
+- operator controls for pause, stop, replay, and screenshots
 
 ---
 
