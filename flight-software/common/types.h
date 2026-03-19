@@ -5,11 +5,29 @@
 
 typedef struct {
     float time_s;
+
+    double lat_deg;
+    double lon_deg;
+    double alt_m;
+
+    double ecef_x_m;
+    double ecef_y_m;
+    double ecef_z_m;
+
+    double vel_north_mps;
+    double vel_east_mps;
+    double vel_down_mps;
+
+    double acc_north_mps2;
+    double acc_east_mps2;
+    double acc_down_mps2;
+
+    float pitch_deg;
+    float pitch_rate_dps;
+
     float altitude_m;
     float velocity_z_mps;
     float acceleration_z_mps2;
-    float pitch_deg;
-    float pitch_rate_dps;
 } vehicle_truth_t;
 
 typedef struct {
@@ -26,8 +44,11 @@ typedef struct {
 } altimeter_data_t;
 
 typedef struct {
+    double lat_deg;
+    double lon_deg;
     float altitude_m;
-    float velocity_z_mps;
+    float velocity_north_mps;
+    float velocity_east_mps;
     bool fix_valid;
 } gps_data_t;
 
@@ -77,5 +98,29 @@ typedef struct {
     command_type_t type;
     bool valid;
 } command_t;
+
+typedef struct {
+    double lat_deg;
+    double lon_deg;
+    double alt_m;
+} geodetic_position_t;
+
+typedef struct {
+    double x_m;
+    double y_m;
+    double z_m;
+} ecef_position_t;
+
+typedef struct {
+    double north_mps;
+    double east_mps;
+    double down_mps;
+} ned_velocity_t;
+
+typedef struct {
+    double north_mps2;
+    double east_mps2;
+    double down_mps2;
+} ned_acceleration_t;
 
 #endif

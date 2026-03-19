@@ -19,6 +19,7 @@ add_executable(flight_computer_sim
         services/fault_manager.c
         comms/command.c
         simulation/vehicle_model.c
+        simulation/geo.c
 )
 
 target_include_directories(flight_computer_sim PRIVATE

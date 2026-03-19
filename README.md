@@ -17,7 +17,7 @@ It implements a simplified On-Board Computer (OBC) architecture, including:
 
 The goal is to build a clean, modular, and testable embedded software architecture, similar in structure to real aerospace systems.
 
-![img_2.png](res/img_2.png)
+![img_1.png](res/img_1.png)
 
 ---
 

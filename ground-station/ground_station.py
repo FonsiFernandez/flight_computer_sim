@@ -10,15 +10,17 @@ from pathlib import Path
 from datetime import datetime
 from collections import deque
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QTextEdit, QLabel, QFileDialog, QLineEdit, QGroupBox,
-    QMessageBox, QFrame
+    QMessageBox, QFrame, QToolButton
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
+from matplotlib.image import imread
 
 
 DEFAULT_EXECUTABLE_PATH = r"C:\Users\Alfonso.Fernandez\CLionProjects\flight-computer-sim\flight-software\cmake-build-debug\flight_computer_sim.exe"
@@ -30,30 +32,45 @@ LOG_LINE_PATTERN = re.compile(
     r"\[(?P<level>INFO|WARN|ERROR)\]\[T\+(?P<time>\d+)\s+ms\]\s+(?P<message>.+)"
 )
 
+
 @dataclass
 class TelemetryFrame:
     time_ms: int
     mode: str
     mission_phase: str
+
     truth_time_s: float
+    truth_lat_deg: float
+    truth_lon_deg: float
     truth_altitude_m: float
     truth_velocity_z_mps: float
     truth_acceleration_z_mps2: float
     truth_pitch_deg: float
     truth_pitch_rate_dps: float
+    truth_ecef_x_m: float
+    truth_ecef_y_m: float
+    truth_ecef_z_m: float
+
     ax: float
     ay: float
     az: float
     gyro_z_dps: float
     imu_valid: int
+
     altitude_m: float
     alt_valid: int
+
+    gps_lat_deg: float
+    gps_lon_deg: float
     gps_altitude_m: float
-    gps_velocity_z_mps: float
+    gps_velocity_north_mps: float
+    gps_velocity_east_mps: float
     gps_fix_valid: int
+
     battery_voltage_v: float
     board_temp_c: float
     hk_valid: int
+
     imu_fault_count: int
     imu_recovery_count: int
     alt_fault_count: int
@@ -61,6 +78,7 @@ class TelemetryFrame:
     imu_latched: int
     alt_latched: int
     health_status: int
+
 
 class PlotWidget(FigureCanvas):
     def __init__(self):
@@ -140,13 +158,31 @@ class GroundStationWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
+        self.auto_follow = True
+
+        script_dir = Path(__file__).resolve().parent
+        self.earth_map_path = script_dir / "res" / "world-map.jpg"
+        self.earth_map_img = None
+
+        if self.earth_map_path.exists():
+            try:
+                self.earth_map_img = imread(str(self.earth_map_path))
+            except Exception as e:
+                print(f"Failed to load Earth map: {e}")
+        else:
+            print(f"Earth map not found: {self.earth_map_path}")
+
         self.gps_altitudes = deque(maxlen=MAX_POINTS)
         self.battery_voltage = deque(maxlen=MAX_POINTS)
         self.board_temp = deque(maxlen=MAX_POINTS)
         self.gyro_z = deque(maxlen=MAX_POINTS)
+        self.truth_lat = deque(maxlen=MAX_POINTS)
+        self.truth_lon = deque(maxlen=MAX_POINTS)
+        self.gps_lat = deque(maxlen=MAX_POINTS)
+        self.gps_lon = deque(maxlen=MAX_POINTS)
 
         self.setWindowTitle("Flight Computer Ground Station")
-        self.resize(1760, 1000)
+        self.resize(1950, 1000)
 
         self.executable_path = DEFAULT_EXECUTABLE_PATH
         self.process = None
@@ -235,6 +271,82 @@ class GroundStationWindow(QMainWindow):
             return "#ff5c5c"
         return "#7f8c9a"
 
+    def style_toolbar(self, toolbar):
+        toolbar.setStyleSheet("""
+            QToolBar {
+                background-color: #1a2430;
+                border: 1px solid #2e3c4b;
+                spacing: 6px;
+                padding: 4px;
+            }
+            QToolButton {
+                background-color: #1a2430;
+                color: #e6eef7;
+                border: 1px solid #314152;
+                border-radius: 4px;
+                padding: 4px 6px;
+                margin: 1px;
+            }
+            QToolButton:hover {
+                background-color: #253444;
+            }
+            QToolButton:pressed {
+                background-color: #31485f;
+            }
+        """)
+        toolbar.setMovable(False)
+        for action in toolbar.actions():
+            widget = toolbar.widgetForAction(action)
+            if isinstance(widget, QToolButton):
+                widget.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+
+    def get_axis_limits(self, plot_widget):
+        limits = {
+            "xlim": plot_widget.ax.get_xlim(),
+            "ylim": plot_widget.ax.get_ylim(),
+        }
+        if plot_widget.ax2 is not None:
+            limits["y2lim"] = plot_widget.ax2.get_ylim()
+        return limits
+
+    def restore_axis_limits(self, plot_widget, limits):
+        if not limits:
+            return
+        plot_widget.ax.set_xlim(limits["xlim"])
+        plot_widget.ax.set_ylim(limits["ylim"])
+        if plot_widget.ax2 is not None and "y2lim" in limits:
+            plot_widget.ax2.set_ylim(limits["y2lim"])
+
+    def toggle_auto_follow(self):
+        self.auto_follow = not self.auto_follow
+        self.btn_auto_follow.setText(f"Auto Follow: {'ON' if self.auto_follow else 'OFF'}")
+        self.record_event(f"OPERATOR  | auto_follow set to {self.auto_follow}")
+
+    @staticmethod
+    def _row_float(row, key, default=0.0):
+        value = row.get(key, "")
+        if value in ("", None):
+            return float(default)
+        try:
+            return float(value)
+        except ValueError:
+            return float(default)
+
+    @staticmethod
+    def _row_int(row, key, default=0):
+        value = row.get(key, "")
+        if value in ("", None):
+            return int(default)
+        try:
+            return int(float(value))
+        except ValueError:
+            return int(default)
+
+    @staticmethod
+    def _row_str(row, key, default=""):
+        value = row.get(key, default)
+        return default if value is None else str(value)
+
     # ---------- UI ----------
 
     def _build_ui(self):
@@ -254,6 +366,7 @@ class GroundStationWindow(QMainWindow):
         self.btn_resume = QPushButton("Resume")
         self.btn_restart = QPushButton("Restart Replay")
         self.btn_stop = QPushButton("Stop")
+        self.btn_auto_follow = QPushButton("Auto Follow: ON")
         self.btn_screenshot = QPushButton("Screenshot")
 
         self.btn_reset_warn = QPushButton("Reset Warn")
@@ -270,7 +383,8 @@ class GroundStationWindow(QMainWindow):
         for w in [
             self.btn_select_exe, self.btn_start_live, self.btn_open_replay,
             self.btn_pause, self.btn_resume, self.btn_restart, self.btn_stop,
-            self.btn_screenshot, self.btn_reset_warn, self.btn_reset_all,
+            self.btn_auto_follow, self.btn_screenshot,
+            self.btn_reset_warn, self.btn_reset_all,
             self.btn_force_nom, self.btn_force_safe, self.btn_status, self.btn_help
         ]:
             controls.addWidget(w)
@@ -304,7 +418,8 @@ class GroundStationWindow(QMainWindow):
         self.alt_plot = PlotWidget()
         self.accel_plot = PlotWidget()
         self.xy_plot = PlotWidget()
-        self.hk_plot = PlotWidget();
+        self.hk_plot = PlotWidget()
+        self.map_plot = PlotWidget()
 
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
@@ -314,10 +429,11 @@ class GroundStationWindow(QMainWindow):
 
         grid.addWidget(self._wrap_group("Altitude / Truth vs Measured", self.alt_plot), 0, 0)
         grid.addWidget(self._wrap_group("Accel Z / Truth vs Measured", self.accel_plot), 0, 1)
-        grid.addWidget(self._wrap_group("Accel X / Y", self.xy_plot), 1, 0)
+        grid.addWidget(self._wrap_group("Ground Track", self.map_plot), 0, 2)
+        grid.addWidget(self._wrap_group("Accel X / Y + Gyro Z", self.xy_plot), 1, 0)
         grid.addWidget(self._wrap_group("Battery / Temperature", self.hk_plot), 1, 1)
-        grid.addWidget(self._wrap_group("System Status", self.status_text), 0, 2)
-        grid.addWidget(self._wrap_group("Event Log", self.events_text), 1, 2)
+        grid.addWidget(self._wrap_group("System Status", self.status_text), 1, 2)
+        grid.addWidget(self._wrap_group("Event Log", self.events_text), 0, 3, 2, 1)
 
         self.footer_label = QLabel("Source: n/a | Session: IDLE | Current mode: UNKNOWN")
         root.addWidget(self.footer_label)
@@ -329,6 +445,7 @@ class GroundStationWindow(QMainWindow):
         self.btn_resume.clicked.connect(self.resume)
         self.btn_restart.clicked.connect(self.restart_replay)
         self.btn_stop.clicked.connect(self.stop_execution)
+        self.btn_auto_follow.clicked.connect(self.toggle_auto_follow)
         self.btn_screenshot.clicked.connect(self.save_screenshot)
 
         self.btn_reset_warn.clicked.connect(lambda: self.send_command("reset_warnings"))
@@ -344,6 +461,12 @@ class GroundStationWindow(QMainWindow):
     def _wrap_group(self, title, widget):
         box = QGroupBox(title)
         layout = QVBoxLayout(box)
+
+        if isinstance(widget, PlotWidget):
+            toolbar = NavigationToolbar(widget, self)
+            self.style_toolbar(toolbar)
+            layout.addWidget(toolbar)
+
         layout.addWidget(widget)
         return box
 
@@ -420,11 +543,16 @@ class GroundStationWindow(QMainWindow):
             mission_phase=str(data.get("mission_phase", "UNKNOWN")),
 
             truth_time_s=float(truth.get("time_s", 0.0)),
+            truth_lat_deg=float(truth.get("lat_deg", 0.0)),
+            truth_lon_deg=float(truth.get("lon_deg", 0.0)),
             truth_altitude_m=float(truth.get("altitude_m", 0.0)),
             truth_velocity_z_mps=float(truth.get("velocity_z_mps", 0.0)),
             truth_acceleration_z_mps2=float(truth.get("acceleration_z_mps2", 0.0)),
             truth_pitch_deg=float(truth.get("pitch_deg", 0.0)),
             truth_pitch_rate_dps=float(truth.get("pitch_rate_dps", 0.0)),
+            truth_ecef_x_m=float(truth.get("ecef_x_m", 0.0)),
+            truth_ecef_y_m=float(truth.get("ecef_y_m", 0.0)),
+            truth_ecef_z_m=float(truth.get("ecef_z_m", 0.0)),
 
             ax=float(imu.get("x", 0.0)),
             ay=float(imu.get("y", 0.0)),
@@ -435,8 +563,11 @@ class GroundStationWindow(QMainWindow):
             altitude_m=float(altimeter.get("altitude_m", 0.0)),
             alt_valid=int(altimeter.get("valid", 0)),
 
+            gps_lat_deg=float(gps.get("lat_deg", 0.0)),
+            gps_lon_deg=float(gps.get("lon_deg", 0.0)),
             gps_altitude_m=float(gps.get("altitude_m", 0.0)),
-            gps_velocity_z_mps=float(gps.get("velocity_z_mps", 0.0)),
+            gps_velocity_north_mps=float(gps.get("velocity_north_mps", 0.0)),
+            gps_velocity_east_mps=float(gps.get("velocity_east_mps", 0.0)),
             gps_fix_valid=int(gps.get("fix_valid", 0)),
 
             battery_voltage_v=float(hk.get("battery_voltage_v", 0.0)),
@@ -502,13 +633,20 @@ class GroundStationWindow(QMainWindow):
         self.truth_accel_z.append(telemetry.truth_acceleration_z_mps2)
         self.altitude_error.append(telemetry.altitude_m - telemetry.truth_altitude_m)
         self.accel_z_error.append(telemetry.az - telemetry.truth_acceleration_z_mps2)
-        self.latest_frame = telemetry
-        self.latest_mode = telemetry.mode
-        self.record_mode_transition_if_needed(telemetry)
+
         self.gps_altitudes.append(telemetry.gps_altitude_m)
         self.battery_voltage.append(telemetry.battery_voltage_v)
         self.board_temp.append(telemetry.board_temp_c)
         self.gyro_z.append(telemetry.gyro_z_dps)
+
+        self.truth_lat.append(telemetry.truth_lat_deg)
+        self.truth_lon.append(telemetry.truth_lon_deg)
+        self.gps_lat.append(telemetry.gps_lat_deg)
+        self.gps_lon.append(telemetry.gps_lon_deg)
+
+        self.latest_frame = telemetry
+        self.latest_mode = telemetry.mode
+        self.record_mode_transition_if_needed(telemetry)
 
     def reset_buffers(self):
         self.times.clear()
@@ -520,10 +658,17 @@ class GroundStationWindow(QMainWindow):
         self.truth_accel_z.clear()
         self.altitude_error.clear()
         self.accel_z_error.clear()
+
         self.gps_altitudes.clear()
         self.battery_voltage.clear()
         self.board_temp.clear()
         self.gyro_z.clear()
+
+        self.truth_lat.clear()
+        self.truth_lon.clear()
+        self.gps_lat.clear()
+        self.gps_lon.clear()
+
         self.latest_frame = None
         self.latest_mode = "UNKNOWN"
         self.mode_transitions.clear()
@@ -546,11 +691,16 @@ class GroundStationWindow(QMainWindow):
             "mode",
             "mission_phase",
             "truth_time_s",
+            "truth_lat_deg",
+            "truth_lon_deg",
             "truth_altitude_m",
             "truth_velocity_z_mps",
             "truth_acceleration_z_mps2",
             "truth_pitch_deg",
             "truth_pitch_rate_dps",
+            "truth_ecef_x_m",
+            "truth_ecef_y_m",
+            "truth_ecef_z_m",
             "ax",
             "ay",
             "az",
@@ -558,8 +708,11 @@ class GroundStationWindow(QMainWindow):
             "imu_valid",
             "altitude_m",
             "alt_valid",
+            "gps_lat_deg",
+            "gps_lon_deg",
             "gps_altitude_m",
-            "gps_velocity_z_mps",
+            "gps_velocity_north_mps",
+            "gps_velocity_east_mps",
             "gps_fix_valid",
             "battery_voltage_v",
             "board_temp_c",
@@ -582,11 +735,16 @@ class GroundStationWindow(QMainWindow):
             frame.mode,
             frame.mission_phase,
             frame.truth_time_s,
+            frame.truth_lat_deg,
+            frame.truth_lon_deg,
             frame.truth_altitude_m,
             frame.truth_velocity_z_mps,
             frame.truth_acceleration_z_mps2,
             frame.truth_pitch_deg,
             frame.truth_pitch_rate_dps,
+            frame.truth_ecef_x_m,
+            frame.truth_ecef_y_m,
+            frame.truth_ecef_z_m,
             frame.ax,
             frame.ay,
             frame.az,
@@ -594,8 +752,11 @@ class GroundStationWindow(QMainWindow):
             frame.imu_valid,
             frame.altitude_m,
             frame.alt_valid,
+            frame.gps_lat_deg,
+            frame.gps_lon_deg,
             frame.gps_altitude_m,
-            frame.gps_velocity_z_mps,
+            frame.gps_velocity_north_mps,
+            frame.gps_velocity_east_mps,
             frame.gps_fix_valid,
             frame.battery_voltage_v,
             frame.board_temp_c,
@@ -730,26 +891,49 @@ class GroundStationWindow(QMainWindow):
             for row in reader:
                 self.replay_frames.append(
                     TelemetryFrame(
-                        time_ms=int(row["time_ms"]),
-                        mode=row["mode"],
-                        mission_phase=row.get("mission_phase", "UNKNOWN"),
-                        truth_time_s=float(row.get("truth_time_s", 0.0)),
-                        truth_altitude_m=float(row.get("truth_altitude_m", 0.0)),
-                        truth_velocity_z_mps=float(row.get("truth_velocity_z_mps", 0.0)),
-                        truth_acceleration_z_mps2=float(row.get("truth_acceleration_z_mps2", 0.0)),
-                        ax=float(row["ax"]),
-                        ay=float(row["ay"]),
-                        az=float(row["az"]),
-                        imu_valid=int(row["imu_valid"]),
-                        altitude_m=float(row["altitude_m"]),
-                        alt_valid=int(row["alt_valid"]),
-                        imu_fault_count=int(row["imu_fault_count"]),
-                        imu_recovery_count=int(row["imu_recovery_count"]),
-                        alt_fault_count=int(row["alt_fault_count"]),
-                        alt_recovery_count=int(row["alt_recovery_count"]),
-                        imu_latched=int(row["imu_latched"]),
-                        alt_latched=int(row["alt_latched"]),
-                        health_status=int(row["health_status"]),
+                        time_ms=self._row_int(row, "time_ms"),
+                        mode=self._row_str(row, "mode", "UNKNOWN"),
+                        mission_phase=self._row_str(row, "mission_phase", "UNKNOWN"),
+
+                        truth_time_s=self._row_float(row, "truth_time_s"),
+                        truth_lat_deg=self._row_float(row, "truth_lat_deg"),
+                        truth_lon_deg=self._row_float(row, "truth_lon_deg"),
+                        truth_altitude_m=self._row_float(row, "truth_altitude_m"),
+                        truth_velocity_z_mps=self._row_float(row, "truth_velocity_z_mps"),
+                        truth_acceleration_z_mps2=self._row_float(row, "truth_acceleration_z_mps2"),
+                        truth_pitch_deg=self._row_float(row, "truth_pitch_deg"),
+                        truth_pitch_rate_dps=self._row_float(row, "truth_pitch_rate_dps"),
+                        truth_ecef_x_m=self._row_float(row, "truth_ecef_x_m"),
+                        truth_ecef_y_m=self._row_float(row, "truth_ecef_y_m"),
+                        truth_ecef_z_m=self._row_float(row, "truth_ecef_z_m"),
+
+                        ax=self._row_float(row, "ax"),
+                        ay=self._row_float(row, "ay"),
+                        az=self._row_float(row, "az"),
+                        gyro_z_dps=self._row_float(row, "gyro_z_dps"),
+                        imu_valid=self._row_int(row, "imu_valid"),
+
+                        altitude_m=self._row_float(row, "altitude_m"),
+                        alt_valid=self._row_int(row, "alt_valid"),
+
+                        gps_lat_deg=self._row_float(row, "gps_lat_deg"),
+                        gps_lon_deg=self._row_float(row, "gps_lon_deg"),
+                        gps_altitude_m=self._row_float(row, "gps_altitude_m"),
+                        gps_velocity_north_mps=self._row_float(row, "gps_velocity_north_mps"),
+                        gps_velocity_east_mps=self._row_float(row, "gps_velocity_east_mps"),
+                        gps_fix_valid=self._row_int(row, "gps_fix_valid"),
+
+                        battery_voltage_v=self._row_float(row, "battery_voltage_v"),
+                        board_temp_c=self._row_float(row, "board_temp_c"),
+                        hk_valid=self._row_int(row, "hk_valid"),
+
+                        imu_fault_count=self._row_int(row, "imu_fault_count"),
+                        imu_recovery_count=self._row_int(row, "imu_recovery_count"),
+                        alt_fault_count=self._row_int(row, "alt_fault_count"),
+                        alt_recovery_count=self._row_int(row, "alt_recovery_count"),
+                        imu_latched=self._row_int(row, "imu_latched"),
+                        alt_latched=self._row_int(row, "alt_latched"),
+                        health_status=self._row_int(row, "health_status"),
                     )
                 )
 
@@ -845,20 +1029,280 @@ class GroundStationWindow(QMainWindow):
             color = self.mode_color(mode)
             plot_widget.ax.axvline(t_s, color=color, linestyle="--", linewidth=1.0, alpha=0.55)
 
-    def update_dashboard(self):
-        if self.replay_mode:
-            self.consume_replay_frames()
-        elif self.live_mode:
-            self.consume_live_output()
+    def render_ground_track(self):
+        map_limits = None if self.auto_follow else self.get_axis_limits(self.map_plot)
 
-        self.render_tiles()
-        self.render_plots()
-        self.render_status()
-        self.render_events()
+        self.map_plot.clear(with_secondary=False)
+        self.map_plot.ax.set_title("GROUND TRACK / KOUROU REGION")
+        self.map_plot.ax.set_xlabel("Longitude [deg]")
+        self.map_plot.ax.set_ylabel("Latitude [deg]")
 
-        source = self.replay_csv_path if self.replay_mode else (self.csv_path.name if self.csv_path else "n/a")
-        session = "REPLAY" if self.replay_mode else ("LIVE" if self.live_mode else "IDLE")
-        self.footer_label.setText(f"Source: {source} | Session: {session} | Current mode: {self.latest_mode}")
+        if self.earth_map_img is not None:
+            self.map_plot.ax.imshow(
+                self.earth_map_img,
+                extent=[-180, 180, -90, 90],
+                aspect="auto",
+                alpha=0.9,
+                zorder=0
+            )
+        else:
+            self.map_plot.ax.text(
+                0.5, 0.5,
+                "EARTH MAP NOT LOADED",
+                transform=self.map_plot.ax.transAxes,
+                ha="center",
+                va="center",
+                fontsize=14,
+                color="red"
+            )
+
+        if len(self.truth_lat) > 0:
+            self.map_plot.ax.plot(
+                self.truth_lon,
+                self.truth_lat,
+                linewidth=2.0,
+                label="Truth Track",
+                zorder=2
+            )
+
+            self.map_plot.ax.plot(
+                self.gps_lon,
+                self.gps_lat,
+                linewidth=1.2,
+                linestyle=":",
+                label="GPS Track",
+                zorder=2
+            )
+
+            self.map_plot.ax.scatter(
+                [self.truth_lon[-1]],
+                [self.truth_lat[-1]],
+                s=60,
+                label="Truth Current",
+                zorder=3
+            )
+
+            if self.latest_frame is not None and self.latest_frame.gps_fix_valid:
+                self.map_plot.ax.scatter(
+                    [self.gps_lon[-1]],
+                    [self.gps_lat[-1]],
+                    s=45,
+                    marker="x",
+                    label="GPS Current",
+                    zorder=3
+                )
+
+            if self.auto_follow:
+                lon_min = min(min(self.truth_lon), min(self.gps_lon))
+                lon_max = max(max(self.truth_lon), max(self.gps_lon))
+                lat_min = min(min(self.truth_lat), min(self.gps_lat))
+                lat_max = max(max(self.truth_lat), max(self.gps_lat))
+
+                pad_lon = max((lon_max - lon_min) * 0.35, 0.05)
+                pad_lat = max((lat_max - lat_min) * 0.35, 0.05)
+
+                self.map_plot.ax.set_xlim(lon_min - pad_lon, lon_max + pad_lon)
+                self.map_plot.ax.set_ylim(lat_min - pad_lat, lat_max + pad_lat)
+        else:
+            if self.auto_follow:
+                self.map_plot.ax.set_xlim(-53.5, -52.0)
+                self.map_plot.ax.set_ylim(4.5, 6.0)
+
+        handles, labels = self.map_plot.ax.get_legend_handles_labels()
+        if handles:
+            self.map_plot.ax.legend(loc="upper left", fontsize=8)
+
+        if not self.auto_follow:
+            self.restore_axis_limits(self.map_plot, map_limits)
+
+        self.map_plot.draw_idle_safe()
+
+    def render_plots(self):
+        alt_limits = None if self.auto_follow else self.get_axis_limits(self.alt_plot)
+        accel_limits = None if self.auto_follow else self.get_axis_limits(self.accel_plot)
+        xy_limits = None if self.auto_follow else self.get_axis_limits(self.xy_plot)
+        hk_limits = None if self.auto_follow else self.get_axis_limits(self.hk_plot)
+
+        # Altitude
+        self.alt_plot.clear(with_secondary=True)
+        self.alt_plot.ax.set_title("ALTITUDE / TRUTH VS MEASURED")
+        self.alt_plot.ax.set_xlabel("Time [s]")
+        self.alt_plot.ax.set_ylabel("Altitude [m]")
+        self.alt_plot.ax2.set_ylabel("Altitude Error [m]")
+
+        if len(self.times) > 0:
+            self.alt_plot.ax.plot(self.times, self.altitudes, linewidth=2.0, label="Measured Altitude")
+            self.alt_plot.ax.plot(self.times, self.truth_altitudes, linewidth=1.8, linestyle="--", label="Truth Altitude")
+            self.alt_plot.ax.plot(self.times, self.gps_altitudes, linewidth=1.5, linestyle=":", label="GPS Altitude")
+            self.alt_plot.ax2.plot(self.times, self.altitude_error, linewidth=1.3, linestyle=":", label="Altitude Error")
+
+        self.draw_transition_lines(self.alt_plot)
+        alt_lines, alt_labels = self.alt_plot.ax.get_legend_handles_labels()
+        alt2_lines, alt2_labels = self.alt_plot.ax2.get_legend_handles_labels()
+        self.alt_plot.ax.legend(alt_lines + alt2_lines, alt_labels + alt2_labels, loc="upper left", fontsize=8)
+
+        if not self.auto_follow:
+            self.restore_axis_limits(self.alt_plot, alt_limits)
+
+        self.alt_plot.draw_idle_safe()
+
+        # Accel Z
+        self.accel_plot.clear(with_secondary=True)
+        self.accel_plot.ax.set_title("ACCEL Z / TRUTH VS MEASURED")
+        self.accel_plot.ax.set_xlabel("Time [s]")
+        self.accel_plot.ax.set_ylabel("Accel Z [m/s²]")
+        self.accel_plot.ax2.set_ylabel("Accel Error [m/s²]")
+
+        if len(self.times) > 0:
+            self.accel_plot.ax.plot(self.times, self.accel_z, linewidth=2.0, label="Measured Accel Z")
+            self.accel_plot.ax.plot(self.times, self.truth_accel_z, linewidth=1.8, linestyle="--", label="Truth Accel Z")
+            self.accel_plot.ax2.plot(self.times, self.accel_z_error, linewidth=1.3, linestyle=":", label="Accel Error")
+
+        self.draw_transition_lines(self.accel_plot)
+        az_lines, az_labels = self.accel_plot.ax.get_legend_handles_labels()
+        az2_lines, az2_labels = self.accel_plot.ax2.get_legend_handles_labels()
+        self.accel_plot.ax.legend(az_lines + az2_lines, az_labels + az2_labels, loc="upper left", fontsize=8)
+
+        if not self.auto_follow:
+            self.restore_axis_limits(self.accel_plot, accel_limits)
+
+        self.accel_plot.draw_idle_safe()
+
+        # Accel X/Y + Gyro Z
+        self.xy_plot.clear(with_secondary=True)
+        self.xy_plot.ax.set_title("ACCEL X / Y + GYRO Z")
+        self.xy_plot.ax.set_xlabel("Time [s]")
+        self.xy_plot.ax.set_ylabel("Accel [m/s²]")
+        self.xy_plot.ax2.set_ylabel("Gyro Z [dps]")
+
+        if len(self.times) > 0:
+            self.xy_plot.ax.plot(self.times, self.accel_x, linewidth=1.8, label="Accel X")
+            self.xy_plot.ax.plot(self.times, self.accel_y, linewidth=1.8, label="Accel Y")
+            self.xy_plot.ax2.plot(self.times, self.gyro_z, linewidth=1.5, linestyle="--", label="Gyro Z")
+
+        self.draw_transition_lines(self.xy_plot)
+        h1, l1 = self.xy_plot.ax.get_legend_handles_labels()
+        h2, l2 = self.xy_plot.ax2.get_legend_handles_labels()
+        if h1 or h2:
+            self.xy_plot.ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=8)
+
+        if not self.auto_follow:
+            self.restore_axis_limits(self.xy_plot, xy_limits)
+
+        self.xy_plot.draw_idle_safe()
+
+        # Battery / Temperature
+        self.hk_plot.clear(with_secondary=True)
+        self.hk_plot.ax.set_title("BATTERY / TEMPERATURE")
+        self.hk_plot.ax.set_xlabel("Time [s]")
+        self.hk_plot.ax.set_ylabel("Battery [V]")
+        self.hk_plot.ax2.set_ylabel("Temperature [°C]")
+
+        if len(self.times) > 0:
+            self.hk_plot.ax.plot(self.times, self.battery_voltage, linewidth=1.8, label="Battery [V]")
+            self.hk_plot.ax2.plot(self.times, self.board_temp, linewidth=1.8, linestyle="--", label="Temp [°C]")
+
+        self.draw_transition_lines(self.hk_plot)
+        h1, l1 = self.hk_plot.ax.get_legend_handles_labels()
+        h2, l2 = self.hk_plot.ax2.get_legend_handles_labels()
+        if h1 or h2:
+            self.hk_plot.ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=8)
+
+        if not self.auto_follow:
+            self.restore_axis_limits(self.hk_plot, hk_limits)
+
+        self.hk_plot.draw_idle_safe()
+
+    def render_status(self):
+        if self.latest_frame is None:
+            new_text = "WAITING FOR TELEMETRY..."
+        else:
+            lf = self.latest_frame
+            status_text = self.health_status_text(lf.health_status)
+            execution_state = "STOPPED" if self.stopped else ("PAUSED" if self.paused else "RUNNING")
+            replay_label = f"{self.replay_index}/{len(self.replay_frames)}" if self.replay_mode else "LIVE"
+
+            new_text = (
+                f"MODE:            {lf.mode}\n"
+                f"EXECUTION:       {execution_state}\n"
+                f"PHASE:           {lf.mission_phase}\n"
+                f"TIME:            {lf.time_ms / 1000.0:.1f} s\n\n"
+
+                f"TRUTH LAT:       {lf.truth_lat_deg:.6f} deg\n"
+                f"TRUTH LON:       {lf.truth_lon_deg:.6f} deg\n"
+                f"TRUTH ALT:       {lf.truth_altitude_m:.2f} m\n"
+                f"TRUTH VEL Z:     {lf.truth_velocity_z_mps:.2f} m/s\n"
+                f"TRUTH ACCEL Z:   {lf.truth_acceleration_z_mps2:.2f} m/s²\n"
+                f"TRUTH PITCH:     {lf.truth_pitch_deg:.2f} deg\n"
+                f"TRUTH PITCH RT:  {lf.truth_pitch_rate_dps:.2f} dps\n\n"
+
+                f"GPS LAT:         {lf.gps_lat_deg:.6f} deg\n"
+                f"GPS LON:         {lf.gps_lon_deg:.6f} deg\n"
+                f"GPS ALT:         {lf.gps_altitude_m:.2f} m\n"
+                f"GPS V_NORTH:     {lf.gps_velocity_north_mps:.2f} m/s\n"
+                f"GPS V_EAST:      {lf.gps_velocity_east_mps:.2f} m/s\n"
+                f"GPS FIX:         {lf.gps_fix_valid}\n\n"
+
+                f"MEAS ALT:        {lf.altitude_m:.2f} m\n"
+                f"MEAS ACCEL Z:    {lf.az:.2f} m/s²\n"
+                f"GYRO Z:          {lf.gyro_z_dps:.2f} dps\n"
+                f"ALT ERROR:       {lf.altitude_m - lf.truth_altitude_m:.2f} m\n"
+                f"ACCEL ERROR:     {lf.az - lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
+
+                f"BATTERY:         {lf.battery_voltage_v:.2f} V\n"
+                f"TEMP:            {lf.board_temp_c:.2f} °C\n"
+                f"HK VALID:        {lf.hk_valid}\n\n"
+
+                f"IMU VALID:       {lf.imu_valid}\n"
+                f"ALT VALID:       {lf.alt_valid}\n"
+                f"HEALTH:          {status_text}\n\n"
+
+                f"IMU FAULT CNT:   {lf.imu_fault_count}\n"
+                f"IMU REC CNT:     {lf.imu_recovery_count}\n"
+                f"ALT FAULT CNT:   {lf.alt_fault_count}\n"
+                f"ALT REC CNT:     {lf.alt_recovery_count}\n\n"
+
+                f"IMU LATCHED:     {lf.imu_latched}\n"
+                f"ALT LATCHED:     {lf.alt_latched}\n\n"
+
+                f"REPLAY FRAME:    {replay_label}\n"
+                f"EVENT LOG FILE:  {self.event_log_path.name if self.event_log_path else 'n/a'}\n"
+            )
+
+        if self.status_text.toPlainText() == new_text:
+            return
+
+        scrollbar = self.status_text.verticalScrollBar()
+        old_value = scrollbar.value()
+        at_bottom = old_value == scrollbar.maximum()
+
+        self.status_text.blockSignals(True)
+        self.status_text.setPlainText(new_text)
+        self.status_text.blockSignals(False)
+
+        if at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            scrollbar.setValue(min(old_value, scrollbar.maximum()))
+
+    def render_events(self):
+        new_text = "WAITING FOR EVENTS..." if len(self.event_lines) == 0 else "\n".join(self.event_lines)
+
+        if self.events_text.toPlainText() == new_text:
+            return
+
+        scrollbar = self.events_text.verticalScrollBar()
+        old_value = scrollbar.value()
+        at_bottom = old_value == scrollbar.maximum()
+
+        self.events_text.blockSignals(True)
+        self.events_text.setPlainText(new_text)
+        self.events_text.blockSignals(False)
+
+        if at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            scrollbar.setValue(min(old_value, scrollbar.maximum()))
 
     def render_tiles(self):
         if self.latest_frame is None:
@@ -866,7 +1310,13 @@ class GroundStationWindow(QMainWindow):
             self.tile_phase.set_value("--")
             self.tile_health.set_value("--")
             self.tile_execution.set_value("IDLE")
-            for tile in [self.tile_mode, self.tile_phase, self.tile_health, self.tile_execution]:
+            self.tile_gps.set_value("--")
+            self.tile_battery.set_value("--")
+            self.tile_temp.set_value("--")
+            for tile in [
+                self.tile_mode, self.tile_phase, self.tile_health, self.tile_execution,
+                self.tile_gps, self.tile_battery, self.tile_temp
+            ]:
                 tile.set_color("#7f8c9a")
             return
 
@@ -894,144 +1344,23 @@ class GroundStationWindow(QMainWindow):
         self.tile_temp.set_value(f"{lf.board_temp_c:.1f} °C")
         self.tile_temp.set_color("#33d17a" if lf.board_temp_c < 50 else "#ff5c5c")
 
-    def render_plots(self):
-        # Altitude
-        self.alt_plot.clear(with_secondary=True)
-        self.alt_plot.ax.set_title("ALTITUDE / TRUTH VS MEASURED")
-        self.alt_plot.ax.set_xlabel("Time [s]")
-        self.alt_plot.ax.set_ylabel("Altitude [m]")
-        self.alt_plot.ax2.set_ylabel("Altitude Error [m]")
+    def update_dashboard(self):
+        if self.replay_mode:
+            self.consume_replay_frames()
+        elif self.live_mode:
+            self.consume_live_output()
 
-        if len(self.times) > 0:
-            self.alt_plot.ax.plot(self.times, self.altitudes, linewidth=2.0, label="Measured Altitude")
-            self.alt_plot.ax.plot(self.times, self.truth_altitudes, linewidth=1.8, linestyle="--",
-                                  label="Truth Altitude")
-            self.alt_plot.ax.plot(self.times, self.gps_altitudes, linewidth=1.5, linestyle=":", label="GPS Altitude")
-            self.alt_plot.ax2.plot(self.times, self.altitude_error, linewidth=1.3, linestyle=":",
-                                   label="Altitude Error")
+        self.render_tiles()
+        self.render_plots()
+        self.render_ground_track()
+        self.render_status()
+        self.render_events()
 
-        self.draw_transition_lines(self.alt_plot)
-
-        alt_lines, alt_labels = self.alt_plot.ax.get_legend_handles_labels()
-        alt2_lines, alt2_labels = self.alt_plot.ax2.get_legend_handles_labels()
-        self.alt_plot.ax.legend(alt_lines + alt2_lines, alt_labels + alt2_labels, loc="upper left", fontsize=8)
-        self.alt_plot.draw_idle_safe()
-
-        # Accel Z
-        self.accel_plot.clear(with_secondary=True)
-        self.accel_plot.ax.set_title("ACCEL Z / TRUTH VS MEASURED")
-        self.accel_plot.ax.set_xlabel("Time [s]")
-        self.accel_plot.ax.set_ylabel("Accel Z [m/s²]")
-        self.accel_plot.ax2.set_ylabel("Accel Error [m/s²]")
-
-        if len(self.times) > 0:
-            self.accel_plot.ax.plot(self.times, self.accel_z, linewidth=2.0, label="Measured Accel Z")
-            self.accel_plot.ax.plot(self.times, self.truth_accel_z, linewidth=1.8, linestyle="--",
-                                    label="Truth Accel Z")
-            self.accel_plot.ax2.plot(self.times, self.accel_z_error, linewidth=1.3, linestyle=":", label="Accel Error")
-
-        self.draw_transition_lines(self.accel_plot)
-
-        az_lines, az_labels = self.accel_plot.ax.get_legend_handles_labels()
-        az2_lines, az2_labels = self.accel_plot.ax2.get_legend_handles_labels()
-        self.accel_plot.ax.legend(az_lines + az2_lines, az_labels + az2_labels, loc="upper left", fontsize=8)
-        self.accel_plot.draw_idle_safe()
-
-        # Accel X/Y
-        self.xy_plot.clear(with_secondary=False)
-        self.xy_plot.ax.set_title("ACCEL X / Y")
-        self.xy_plot.ax.set_xlabel("Time [s]")
-        self.xy_plot.ax.set_ylabel("Acceleration [m/s²]")
-
-        if len(self.times) > 0:
-            self.xy_plot.ax.plot(self.times, self.accel_x, linewidth=1.8, label="Accel X")
-            self.xy_plot.ax.plot(self.times, self.accel_y, linewidth=1.8, label="Accel Y")
-            self.xy_plot.ax.plot(self.times, self.gyro_z, linewidth=1.4, linestyle="--", label="Gyro Z [dps]")
-
-        self.draw_transition_lines(self.xy_plot)
-
-        handles, labels = self.xy_plot.ax.get_legend_handles_labels()
-        if handles:
-            self.xy_plot.ax.legend(loc="upper left", fontsize=8)
-        self.xy_plot.draw_idle_safe()
-
-        # Battery / Temperature
-        self.hk_plot.clear(with_secondary=True)
-        self.hk_plot.ax.set_title("BATTERY / TEMPERATURE")
-        self.hk_plot.ax.set_xlabel("Time [s]")
-        self.hk_plot.ax.set_ylabel("Battery [V]")
-        self.hk_plot.ax2.set_ylabel("Temperature [°C]")
-
-        if len(self.times) > 0:
-            self.hk_plot.ax.plot(self.times, self.battery_voltage, linewidth=1.8, label="Battery [V]")
-            self.hk_plot.ax2.plot(self.times, self.board_temp, linewidth=1.8, linestyle="--", label="Temp [°C]")
-
-        self.draw_transition_lines(self.hk_plot)
-
-        h1, l1 = self.hk_plot.ax.get_legend_handles_labels()
-        h2, l2 = self.hk_plot.ax2.get_legend_handles_labels()
-        if h1 or h2:
-            self.hk_plot.ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=8)
-        self.hk_plot.draw_idle_safe()
-
-    def render_status(self):
-        if self.latest_frame is None:
-            self.status_text.setPlainText("WAITING FOR TELEMETRY...")
-            return
-
-        lf = self.latest_frame
-        status_text = self.health_status_text(lf.health_status)
-        execution_state = "STOPPED" if self.stopped else ("PAUSED" if self.paused else "RUNNING")
-        replay_label = f"{self.replay_index}/{len(self.replay_frames)}" if self.replay_mode else "LIVE"
-
-        panel_text = (
-            f"MODE:            {lf.mode}\n"
-            f"EXECUTION:       {execution_state}\n"
-            f"PHASE:           {lf.mission_phase}\n"
-            f"TIME:            {lf.time_ms / 1000.0:.1f} s\n\n"
-
-            f"TRUTH ALT:       {lf.truth_altitude_m:.2f} m\n"
-            f"TRUTH VEL Z:     {lf.truth_velocity_z_mps:.2f} m/s\n"
-            f"TRUTH ACCEL Z:   {lf.truth_acceleration_z_mps2:.2f} m/s²\n"
-            f"TRUTH PITCH:     {lf.truth_pitch_deg:.2f} deg\n"
-            f"TRUTH PITCH RT:  {lf.truth_pitch_rate_dps:.2f} dps\n\n"
-
-            f"MEAS ALT:        {lf.altitude_m:.2f} m\n"
-            f"GPS ALT:         {lf.gps_altitude_m:.2f} m\n"
-            f"GPS VEL Z:       {lf.gps_velocity_z_mps:.2f} m/s\n"
-            f"MEAS ACCEL Z:    {lf.az:.2f} m/s²\n"
-            f"GYRO Z:          {lf.gyro_z_dps:.2f} dps\n"
-            f"ALT ERROR:       {lf.altitude_m - lf.truth_altitude_m:.2f} m\n"
-            f"ACCEL ERROR:     {lf.az - lf.truth_acceleration_z_mps2:.2f} m/s²\n\n"
-
-            f"BATTERY:         {lf.battery_voltage_v:.2f} V\n"
-            f"TEMP:            {lf.board_temp_c:.2f} °C\n"
-            f"HK VALID:        {lf.hk_valid}\n\n"
-
-            f"IMU VALID:       {lf.imu_valid}\n"
-            f"ALT VALID:       {lf.alt_valid}\n"
-            f"GPS FIX:         {lf.gps_fix_valid}\n"
-            f"HEALTH:          {status_text}\n\n"
-
-            f"IMU FAULT CNT:   {lf.imu_fault_count}\n"
-            f"IMU REC CNT:     {lf.imu_recovery_count}\n"
-            f"ALT FAULT CNT:   {lf.alt_fault_count}\n"
-            f"ALT REC CNT:     {lf.alt_recovery_count}\n\n"
-
-            f"IMU LATCHED:     {lf.imu_latched}\n"
-            f"ALT LATCHED:     {lf.alt_latched}\n\n"
-
-            f"REPLAY FRAME:    {replay_label}\n"
-            f"EVENT LOG FILE:  {self.event_log_path.name if self.event_log_path else 'n/a'}\n"
+        source = self.replay_csv_path if self.replay_mode else (self.csv_path.name if self.csv_path else "n/a")
+        session = "REPLAY" if self.replay_mode else ("LIVE" if self.live_mode else "IDLE")
+        self.footer_label.setText(
+            f"Source: {source} | Session: {session} | Current mode: {self.latest_mode} | Auto Follow: {'ON' if self.auto_follow else 'OFF'}"
         )
-
-        self.status_text.setPlainText(panel_text)
-
-    def render_events(self):
-        if len(self.event_lines) == 0:
-            self.events_text.setPlainText("WAITING FOR EVENTS...")
-        else:
-            self.events_text.setPlainText("\n".join(self.event_lines))
 
     # ---------- lifecycle ----------
 

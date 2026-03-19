@@ -6,9 +6,9 @@
 
 static int sample_count = 0;
 
-static float random_symmetric(float amplitude) {
-    float r = (float)rand() / (float)RAND_MAX;
-    return (2.0f * r - 1.0f) * amplitude;
+static double random_symmetric(double amplitude) {
+    double r = (double)rand() / (double)RAND_MAX;
+    return (2.0 * r - 1.0) * amplitude;
 }
 
 void gps_sim_init(void) {
@@ -21,8 +21,11 @@ gps_data_t gps_sim_read(void) {
 
     sample_count++;
 
-    data.altitude_m = truth->altitude_m + GPS_ALTITUDE_BIAS_M + random_symmetric(GPS_ALTITUDE_NOISE_M);
-    data.velocity_z_mps = truth->velocity_z_mps + GPS_VELOCITY_BIAS_MPS + random_symmetric(GPS_VELOCITY_NOISE_MPS);
+    data.lat_deg = truth->lat_deg + random_symmetric(0.00001);
+    data.lon_deg = truth->lon_deg + random_symmetric(0.00001);
+    data.altitude_m = truth->altitude_m + (float)random_symmetric(1.5);
+    data.velocity_north_mps = (float)(truth->vel_north_mps + random_symmetric(0.5));
+    data.velocity_east_mps = (float)(truth->vel_east_mps + random_symmetric(0.5));
     data.fix_valid = true;
 
     if (sample_count >= GPS_FAILURE_START_SAMPLE &&
